@@ -2,7 +2,7 @@ name: 🦞 构建川叶视频APK
 
 on:
   push:
-    branches: [main, master]
+分支: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -12,10 +12,18 @@ jobs:
       - name: 📥 拉取代码
         uses: actions/checkout@v4
 
+      - name: 🧹 释放磁盘空间
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          df -h
+
       - name: 🔧 安装系统依赖
         run: |
           sudo apt update
           sudo apt install -y python3-pip openjdk-17-jdk git autoconf libtool cmake libffi-dev libssl-dev zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
 
       - name: 📦 安装 Buildozer
         run: |
