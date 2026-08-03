@@ -32,7 +32,7 @@ android.ndk = 25b
 android.accept_sdk_license = True
 
 # Gradle 兼容
-android.gradle_dependencies = com.android.tools.build:gradle:7.3.3
+#android.gradle_dependencies = com.android.tools.build:gradle:7.3.3
 
 # 图标和方向
 orientation = portrait
