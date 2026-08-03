@@ -31,9 +31,8 @@ android.ndk = 25b
 # SDK 许可
 android.accept_sdk_license = True
 
-# Gradle 兼容 Java 11/17
+# Gradle 兼容
 android.gradle_dependencies = com.android.tools.build:gradle:7.3.3
-p4a.branch = develop
 
 # 图标和方向
 orientation = portrait
