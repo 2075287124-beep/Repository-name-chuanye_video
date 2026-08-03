@@ -1,8 +1,9 @@
 """
-川叶视频模块 — Android APK 版 (Kivy)
+川叶视频模块 — Android APK 版 (Kivy) v2.2
 小川叶原作 | Operit 姐姐移植
 """
 
+import os
 import re
 import threading
 import requests
@@ -19,6 +20,27 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.popup import Popup
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
+from kivy.core.text import LabelBase
+
+# ========== 中文字体加载 ==========
+FONT_NAME = 'Roboto'  # fallback
+_CJK_PATHS = [
+    '/system/fonts/NotoSansCJK-Regular.ttc',
+    '/system/fonts/DroidSansFallback.ttf',
+    '/system/fonts/NotoSansSC-Regular.otf',
+    '/system/fonts/NotoSerifCJK-Regular.ttc',
+]
+
+for _fp in _CJK_PATHS:
+    if os.path.exists(_fp):
+        try:
+            LabelBase.register(name='CJKFont', fn_regular=_fp)
+            FONT_NAME = 'CJKFont'
+            break
+        except Exception:
+            continue
+
+print(f"[川叶] 字体: {FONT_NAME}")
 
 # ========== 平台配置 ==========
 PLATFORM_MAP = {
@@ -41,14 +63,15 @@ def detect_platform(url: str) -> str | None:
 
 
 def get_ytdlp_info(url: str) -> str:
-    ydl_opts = {"quiet": True}
+    ydl_opts = {"quiet": True, "no_warnings": True}
     lines = []
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         platform_name = PLATFORM_MAP.get(detect_platform(url), {}).get("name", "视频")
         lines.append(f"====== {platform_name}情报 ======")
         lines.append(f"标题：{info.get('title', '未知')}")
-        lines.append(f"时长：{info.get('duration', '?')} 秒")
+        dur = info.get('duration')
+        lines.append(f"时长：{dur} 秒" if dur else "时长：未知")
         lines.append(f"上传者：{info.get('uploader', '未知')}")
         lines.append(f"格式数：{len(info.get('formats', []))}")
     return "\n".join(lines)
@@ -56,7 +79,9 @@ def get_ytdlp_info(url: str) -> str:
 
 def get_generic_info(url: str) -> str:
     lines = []
-    response = requests.get(url, timeout=10)
+    response = requests.get(url, timeout=15, headers={
+        "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36"
+    })
     response.encoding = response.apparent_encoding
     lines.append(f"✅ 状态码：{response.status_code} | 大小：{len(response.content)} 字符")
     soup = BeautifulSoup(response.text, "html.parser")
@@ -87,16 +112,18 @@ class VideoAppUI(BoxLayout):
 
         # 标题
         self.add_widget(Label(
-            text="🎬 川叶视频模块",
+            text="[b]川叶视频模块[/b]",
+            markup=True,
             font_size="22sp",
+            font_name=FONT_NAME,
             size_hint=(1, 0.1),
-            bold=True,
             color=(0.2, 0.7, 1, 1),
         ))
 
         # URL 输入
         self.url_input = TextInput(
             hint_text="粘贴视频链接...",
+            font_name=FONT_NAME,
             size_hint=(1, 0.08),
             multiline=False,
             font_size="14sp",
@@ -105,15 +132,31 @@ class VideoAppUI(BoxLayout):
 
         # 按钮行
         btn_box = BoxLayout(size_hint=(1, 0.1), spacing=10)
-        info_btn = Button(text="🔍 获取信息", background_color=(0.2, 0.6, 1, 1))
+        
+        info_btn = Button(
+            text="获取信息",
+            font_name=FONT_NAME,
+            font_size="14sp",
+            background_color=(0.2, 0.6, 1, 1),
+        )
         info_btn.bind(on_press=self.on_get_info)
         btn_box.add_widget(info_btn)
 
-        download_btn = Button(text="⬇ 下载视频", background_color=(0.2, 0.8, 0.4, 1))
+        download_btn = Button(
+            text="下载视频",
+            font_name=FONT_NAME,
+            font_size="14sp",
+            background_color=(0.2, 0.8, 0.4, 1),
+        )
         download_btn.bind(on_press=self.on_download)
         btn_box.add_widget(download_btn)
 
-        paste_btn = Button(text="📋 粘贴", background_color=(0.5, 0.5, 0.5, 1))
+        paste_btn = Button(
+            text="粘贴",
+            font_name=FONT_NAME,
+            font_size="14sp",
+            background_color=(0.5, 0.5, 0.5, 1),
+        )
         paste_btn.bind(on_press=self.on_paste)
         btn_box.add_widget(paste_btn)
 
@@ -122,6 +165,7 @@ class VideoAppUI(BoxLayout):
         # 输出区域
         self.output_label = Label(
             text="等待输入...\n",
+            font_name=FONT_NAME,
             size_hint=(1, None),
             font_size="13sp",
             halign="left",
@@ -138,7 +182,6 @@ class VideoAppUI(BoxLayout):
     def log(self, msg: str):
         current = self.output_label.text or ""
         self.output_label.text = current + msg + "\n"
-        # 自动滚动到底部
         self.output_label.text_size = (self.output_label.width, None)
 
     def on_paste(self, instance):
@@ -146,18 +189,18 @@ class VideoAppUI(BoxLayout):
             clipboard_text = Clipboard.paste()
             if clipboard_text:
                 self.url_input.text = clipboard_text
-                self.log("📋 已粘贴剪贴板内容")
+                self.log("[OK] 已粘贴剪贴板内容")
         except Exception:
-            self.log("⚠️ 粘贴失败，请手动输入")
+            self.log("[!] 粘贴失败，请手动输入")
 
     def on_get_info(self, instance):
         url = self.url_input.text.strip()
         if not url:
-            self.log("⚠️ 请输入视频地址！")
+            self.log("[!] 请输入视频地址！")
             return
         if not url.startswith("http"):
             url = "https://" + url
-        self.log(f"📥 分析中：{url}")
+        self.log(f"[...] 分析中：{url}")
         threading.Thread(target=self._fetch_info, args=(url,), daemon=True).start()
 
     def _fetch_info(self, url: str):
@@ -167,7 +210,7 @@ class VideoAppUI(BoxLayout):
                 result = get_ytdlp_info(url)
                 Clock.schedule_once(lambda dt: self.log(result))
             except Exception as e:
-                Clock.schedule_once(lambda dt: self.log(f"⚠️ yt-dlp失败：{e}"))
+                Clock.schedule_once(lambda dt: self.log(f"[!] yt-dlp失败：{e}"))
                 self._fetch_generic(url)
         else:
             self._fetch_generic(url)
@@ -177,35 +220,46 @@ class VideoAppUI(BoxLayout):
             result = get_generic_info(url)
             Clock.schedule_once(lambda dt: self.log(result))
         except Exception as e:
-            Clock.schedule_once(lambda dt: self.log(f"❌ 解析失败：{e}"))
+            Clock.schedule_once(lambda dt: self.log(f"[X] 解析失败：{e}"))
 
     def on_download(self, instance):
         url = self.url_input.text.strip()
         if not url:
-            self.log("⚠️ 请输入视频地址！")
+            self.log("[!] 请输入视频地址！")
             return
-        self.log("⬇ 开始下载（后台运行）...")
+        self.log("[...] 开始下载（后台运行）...")
         threading.Thread(target=self._do_download, args=(url,), daemon=True).start()
 
     def _do_download(self, url: str):
         ydl_opts = {
             "outtmpl": "/storage/emulated/0/Download/%(title)s.%(ext)s",
-            "merge_output_format": "mp4",
+            "format": "best[ext=mp4]/best",  # 优先单文件mp4，避免需要ffmpeg合并
             "quiet": True,
+            "no_warnings": True,
+            "extractor_args": {"bilibili": {"force_use_alt": True}},
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(info)
-            Clock.schedule_once(lambda dt: self.log(f"✅ 下载完成：{filename}"))
+            Clock.schedule_once(lambda dt: self.log(f"[OK] 下载完成：{filename}"))
             Clock.schedule_once(lambda dt: self._show_popup("下载完成", f"已保存到：\n{filename}"))
         except Exception as e:
-            Clock.schedule_once(lambda dt: self.log(f"❌ 下载失败：{e}"))
+            Clock.schedule_once(lambda dt: self.log(f"[X] 下载失败：{e}"))
+            # 尝试不指定格式
+            try:
+                ydl_opts["format"] = "best"
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                Clock.schedule_once(lambda dt: self.log(f"[OK] 下载完成(通用)：{filename}"))
+            except Exception as e2:
+                Clock.schedule_once(lambda dt: self.log(f"[X] 也失败了：{e2}"))
 
     def _show_popup(self, title: str, msg: str):
         content = BoxLayout(orientation="vertical", padding=10)
-        content.add_widget(Label(text=msg))
-        btn = Button(text="好的", size_hint=(1, 0.3))
+        content.add_widget(Label(text=msg, font_name=FONT_NAME))
+        btn = Button(text="好的", font_name=FONT_NAME, size_hint=(1, 0.3))
         popup = Popup(title=title, content=content, size_hint=(0.8, 0.4))
         btn.bind(on_press=popup.dismiss)
         content.add_widget(btn)
