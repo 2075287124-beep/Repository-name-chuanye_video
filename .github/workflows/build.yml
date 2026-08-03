@@ -2,7 +2,7 @@ name: Build-Chuanye-Video-APK
 
 on:
   push:
-    branches: [main, master]
+分支: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -39,3 +39,4 @@ jobs:
         with:
           name: chuanye-video-apk
           path: bin/*.apk
+#11
