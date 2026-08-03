@@ -39,4 +39,3 @@ jobs:
         with:
           name: chuanye-video-apk
           path: bin/*.apk
-#11
