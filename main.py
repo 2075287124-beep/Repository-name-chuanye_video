@@ -55,6 +55,7 @@ except Exception:
 _DOWNLOAD_DIRS = [
     '/storage/emulated/0/Download',
     '/sdcard/Download',
+    '/data/data/com.chuanye.chuanye_video/files',  # 应用内部，一定可写
 ]
 _DOWNLOAD_DIR = None
 for _dd in _DOWNLOAD_DIRS:
@@ -383,28 +384,22 @@ class VideoAppUI(BoxLayout):
         """稳健下载：多层降级策略"""
         try:
             # 策略1: best[ext=mp4] 单文件
-            self._try_download(url, {
-                "format": "best[ext=mp4]/best",
-                "quiet": True, "no_warnings": True, "noprogress": True,
-            })
+            self._try_download(url, {"format": "best[ext=mp4]/best"})
         except Exception as e1:
             Clock.schedule_once(lambda dt, e=e1: self.log(f"[!] 策略1失败：{e}"))
             try:
                 # 策略2: best 通用
-                self._try_download(url, {
-                    "format": "best",
-                    "quiet": True, "no_warnings": True, "noprogress": True,
-                })
+                self._try_download(url, {"format": "best"})
             except Exception as e2:
                 Clock.schedule_once(lambda dt, e=e2: self.log(f"[X] 策略2也失败：{e}"))
 
     def _try_download(self, url: str, extra_opts: dict):
-        outtmpl = os.path.join(_DOWNLOAD_DIR, "%(title).100s.%(ext)s")
+        outtmpl = os.path.join(_DOWNLOAD_DIR, "%(id)s.%(ext)s")
         ydl_opts = {
             "outtmpl": outtmpl,
-            "restrictfilenames": True,
-            "merge_output_format": "mp4",
             "progress_hooks": [self._on_progress],
+            "quiet": True,
+            "no_warnings": True,
         }
         ydl_opts.update(extra_opts)
 
@@ -417,25 +412,24 @@ class VideoAppUI(BoxLayout):
         # 完成后清掉进度条
         Clock.schedule_once(lambda dt: self._set_progress(0, ""))
 
-        # 手动找下载好的文件（避免 prepare_filename 的 Android bug）
-        title = _safe_name(info.get('title', 'video'))
+        # 手动找下载好的文件
+        vid = info.get('id', 'video')
         ext = info.get('ext', 'mp4')
-        # 先精确匹配，再模糊搜索
-        expected = os.path.join(_DOWNLOAD_DIR, f"{title}.{ext}")
+        # 模糊搜索最近下载的文件
+        expected = os.path.join(_DOWNLOAD_DIR, f"{vid}.{ext}")
         found = None
         if os.path.exists(expected):
             found = expected
         else:
-            # 模糊搜索最近下载的文件
-            pattern = os.path.join(_DOWNLOAD_DIR, f"*{title}*.*")
+            pattern = os.path.join(_DOWNLOAD_DIR, f"*{vid}*.*")
             candidates = glob.glob(pattern)
             if candidates:
-                found = max(candidates, key=os.path.getmtime)  # 最新的
+                found = max(candidates, key=os.path.getmtime)
 
         if found and os.path.exists(found):
             filename = found
         else:
-            filename = f"{_DOWNLOAD_DIR}/{title}.{ext}"
+            filename = f"{_DOWNLOAD_DIR}/{vid}.{ext}"
 
         size_mb = os.path.getsize(filename) / (1024 * 1024) if os.path.exists(filename) else 0
         Clock.schedule_once(lambda dt, f=filename, s=size_mb:
