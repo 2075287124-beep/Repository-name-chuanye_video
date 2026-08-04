@@ -306,8 +306,8 @@ class VideoAppUI(BoxLayout):
     # ---- 关于弹窗 ----
     def _show_about(self):
         msg = ("川叶视频模块 v2.8\n\n"
-               "作者：小川叶大人\n"
-               "移植：笨蛋ai姐姐 (Operit)\n"
+               "作者：小川叶\n"
+               "移植：笨蛋姐姐 (Operit)\n"
                "QQ：2075287124\n\n"
                "支持：B站 抖音 快手 小红书\n"
                "       + 通用网页视频抓取")
@@ -441,8 +441,23 @@ class VideoAppUI(BoxLayout):
         Clock.schedule_once(lambda dt: self._reset_progress())
         self._set_progress_thread(0, "解析中...")
 
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
+        platform = detect_platform(url)
+        pname = PLATFORM_MAP.get(platform, {}).get("name", "未知平台")
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "simulate": True,       # 模拟模式，避免某些提取器尝试写文件
+            "skip_download": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            err = str(e)
+            if 'write' in err.lower():
+                raise Exception(f"{pname}提取器在Android上不兼容({err[:80]})")
+            raise
 
         title = info.get('title', '视频')
         vid = info.get('id', 'video')
