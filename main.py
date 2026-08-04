@@ -381,61 +381,167 @@ class VideoAppUI(BoxLayout):
         threading.Thread(target=self._do_download, args=(url,), daemon=True).start()
 
     def _do_download(self, url: str):
-        """稳健下载：多层降级策略"""
+        """策略1: yt-dlp提取 + 策略2: 通用网页抓取"""
         try:
-            # 策略1: best[ext=mp4] 单文件
-            self._try_download(url, {"format": "best[ext=mp4]/best"})
-        except Exception as e1:
-            Clock.schedule_once(lambda dt, e=e1: self.log(f"[!] 策略1失败：{e}"))
-            try:
-                # 策略2: best 通用
-                self._try_download(url, {"format": "best"})
-            except Exception as e2:
-                Clock.schedule_once(lambda dt, e=e2: self.log(f"[X] 策略2也失败：{e}"))
+            self._try_download_ytdlp(url)
+            return
+        except Exception as e:
+            Clock.schedule_once(lambda dt, e=e:
+                self.log(f"[!] yt-dlp方式失败，尝试通用抓取..."))
 
-    def _try_download(self, url: str, extra_opts: dict):
-        outtmpl = os.path.join(_DOWNLOAD_DIR, "%(id)s.%(ext)s")
-        ydl_opts = {
-            "outtmpl": outtmpl,
-            "progress_hooks": [self._on_progress],
-            "quiet": True,
-            "no_warnings": True,
-        }
-        ydl_opts.update(extra_opts)
+        try:
+            self._try_download_generic(url)
+        except Exception as e:
+            Clock.schedule_once(lambda dt, e=e:
+                self.log(f"[X] 通用下载也失败：{e}"))
 
-        # 重置进度条
+    # ========== 策略1：yt-dlp 提取 + requests 下载 ==========
+    def _try_download_ytdlp(self, url: str):
         Clock.schedule_once(lambda dt: self._reset_progress())
+        self._set_progress_thread(0, "解析中...")
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
 
-        # 完成后清掉进度条
-        Clock.schedule_once(lambda dt: self._set_progress(0, ""))
-
-        # 手动找下载好的文件
+        title = info.get('title', '视频')
         vid = info.get('id', 'video')
-        ext = info.get('ext', 'mp4')
-        # 模糊搜索最近下载的文件
-        expected = os.path.join(_DOWNLOAD_DIR, f"{vid}.{ext}")
-        found = None
-        if os.path.exists(expected):
-            found = expected
-        else:
-            pattern = os.path.join(_DOWNLOAD_DIR, f"*{vid}*.*")
-            candidates = glob.glob(pattern)
-            if candidates:
-                found = max(candidates, key=os.path.getmtime)
+        formats = info.get('formats', [])
+        if not formats:
+            raise Exception("未找到可用格式")
 
-        if found and os.path.exists(found):
-            filename = found
-        else:
-            filename = f"{_DOWNLOAD_DIR}/{vid}.{ext}"
+        # 选最佳格式
+        best = None
+        # 1) mp4有音+有画
+        for f in formats:
+            if (f.get('ext') == 'mp4' and f.get('url') and
+                f.get('acodec', 'none') != 'none' and
+                f.get('vcodec', 'none') != 'none'):
+                if best is None or (f.get('filesize') or f.get('filesize_approx') or 0) > (best.get('filesize') or best.get('filesize_approx') or 0):
+                    best = f
+        # 2) mp4有画面（无音也可）
+        if best is None:
+            for f in formats:
+                if (f.get('ext') == 'mp4' and f.get('url') and
+                    f.get('vcodec', 'none') != 'none'):
+                    if best is None or (f.get('height') or 0) > (best.get('height') or 0):
+                        best = f
+        # 3) 任意有画面的格式
+        if best is None:
+            for f in formats:
+                if f.get('vcodec', 'none') != 'none' and f.get('url'):
+                    if best is None or (f.get('height') or 0) > (best.get('height') or 0):
+                        best = f
+        # 4) 兜底
+        if best is None:
+            for f in formats:
+                if f.get('url'):
+                    best = f
+                    break
+        if best is None:
+            raise Exception("无法获取下载地址")
 
-        size_mb = os.path.getsize(filename) / (1024 * 1024) if os.path.exists(filename) else 0
-        Clock.schedule_once(lambda dt, f=filename, s=size_mb:
-            self.log(f"[OK] 下载完成 ({s:.1f}MB)：{f}"))
-        Clock.schedule_once(lambda dt, f=filename:
-            self._show_popup("下载完成", f"已保存到：\n{f}"))
+        dl_url = best['url']
+        ext = best.get('ext', 'mp4')
+        total = best.get('filesize') or best.get('filesize_approx') or 0
+        h = best.get('height', '?')
+        outpath = os.path.join(_DOWNLOAD_DIR, f"{vid}.{ext}")
+
+        Clock.schedule_once(lambda dt, t=title, hh=h, s=total:
+            self.log(f"[...] {t} ({hh}p, {s/1024/1024:.1f}MB)"))
+
+        self._stream_download(dl_url, outpath, total, title)
+
+    # ========== 策略2：通用网页抓取 mp4/video ==========
+    def _try_download_generic(self, url: str):
+        Clock.schedule_once(lambda dt: self._reset_progress())
+        self._set_progress_thread(0, "抓取网页...")
+
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36"
+        })
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        dl_url = None
+        title = "video"
+
+        # 1) 找 <video> 标签
+        for v in soup.find_all("video"):
+            src = v.get("src") or (v.find("source") or {}).get("src")
+            if src:
+                dl_url = urljoin(url, src)
+                break
+
+        # 2) 找页面里的 .mp4 链接
+        if not dl_url:
+            t = resp.text
+            m = re.search(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', t)
+            if m:
+                dl_url = m.group(0)
+
+        # 3) 找 .m3u8 链接
+        if not dl_url:
+            m = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', resp.text)
+            if m:
+                dl_url = m.group(0)
+
+        if not dl_url:
+            raise Exception("未找到视频地址（无video标签、无.mp4、无.m3u8）")
+
+        # 生成文件名
+        if soup.title:
+            title = soup.title.string.strip() or "video"
+        ext = "mp4" if ".mp4" in dl_url else ("m3u8" if ".m3u8" in dl_url else "mp4")
+        safe_title = _safe_name(title, 50)
+        outpath = os.path.join(_DOWNLOAD_DIR, f"{safe_title}.{ext}")
+
+        Clock.schedule_once(lambda dt, u=dl_url[:80]:
+            self.log(f"[...] 找到视频：{u}..."))
+        self._stream_download(dl_url, outpath, 0, title)
+
+    # ========== 公共：流式下载（requests.iter_content） ==========
+    def _stream_download(self, dl_url: str, outpath: str, total_size: int, title: str):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36",
+            "Referer": dl_url,
+        }
+
+        resp = requests.get(dl_url, stream=True, timeout=60, headers=headers)
+        resp.raise_for_status()
+
+        if total_size == 0:
+            total_size = int(resp.headers.get('content-length', 0)) or 0
+
+        downloaded = 0
+        last_pct = -1
+        with open(outpath, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        pct = min(int(downloaded / total_size * 100), 99)
+                        if pct != last_pct:
+                            last_pct = pct
+                            info_text = f"{pct}%  {downloaded/1024/1024:.1f}/{total_size/1024/1024:.1f}MB"
+                            Clock.schedule_once(lambda dt, v=pct, t=info_text:
+                                self._set_progress(v, t))
+                    elif downloaded % (256 * 1024) == 0:
+                        # 没有总大小，只显示已下载
+                        info_text = f"{downloaded/1024/1024:.1f}MB"
+                        Clock.schedule_once(lambda dt, t=info_text:
+                            self._set_progress(50, t))
+
+        Clock.schedule_once(lambda dt: self._set_progress(100, ""))
+        size_mb = os.path.getsize(outpath) / (1024 * 1024)
+        Clock.schedule_once(lambda dt, p=outpath, s=size_mb:
+            self.log(f"[OK] 下载完成 ({s:.1f}MB)：{p}"))
+        Clock.schedule_once(lambda dt, t=title, p=outpath:
+            self._show_popup("下载完成", f"{t}\n已保存到：\n{p}"))
+
+    def _set_progress_thread(self, value: int, text: str):
+        Clock.schedule_once(lambda dt, v=value, t=text:
+            self._set_progress(v, t))
 
     def _show_popup(self, title: str, msg: str):
         try:
