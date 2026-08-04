@@ -387,13 +387,13 @@ class VideoAppUI(BoxLayout):
             return
         except Exception as e:
             Clock.schedule_once(lambda dt, e=e:
-                self.log(f"[!] yt-dlp方式失败，尝试通用抓取..."))
+                self.log(f"[!] yt-dlp失败({e})，尝试通用抓取..."))
 
         try:
             self._try_download_generic(url)
         except Exception as e:
             Clock.schedule_once(lambda dt, e=e:
-                self.log(f"[X] 通用下载也失败：{e}"))
+                self.log(f"[X] 也失败：{e}"))
 
     # ========== 策略1：yt-dlp 提取 + requests 下载 ==========
     def _try_download_ytdlp(self, url: str):
@@ -449,7 +449,9 @@ class VideoAppUI(BoxLayout):
         Clock.schedule_once(lambda dt, t=title, hh=h, s=total:
             self.log(f"[...] {t} ({hh}p, {s/1024/1024:.1f}MB)"))
 
-        self._stream_download(dl_url, outpath, total, title)
+        # 继承 yt-dlp 提取的 http_headers（含 Referer/Cookie，B站必需！）
+        extra_headers = best.get('http_headers', {})
+        self._stream_download(dl_url, outpath, total, title, extra_headers)
 
     # ========== 策略2：通用网页抓取 mp4/video ==========
     def _try_download_generic(self, url: str):
@@ -500,11 +502,15 @@ class VideoAppUI(BoxLayout):
         self._stream_download(dl_url, outpath, 0, title)
 
     # ========== 公共：流式下载（requests.iter_content） ==========
-    def _stream_download(self, dl_url: str, outpath: str, total_size: int, title: str):
+    def _stream_download(self, dl_url: str, outpath: str, total_size: int, title: str, extra_headers: dict = None):
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36",
-            "Referer": dl_url,
         }
+        if extra_headers:
+            headers.update(extra_headers)
+        # Referer兜底
+        if 'Referer' not in headers:
+            headers['Referer'] = dl_url
 
         resp = requests.get(dl_url, stream=True, timeout=60, headers=headers)
         resp.raise_for_status()
