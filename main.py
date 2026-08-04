@@ -1,16 +1,17 @@
 """
-川叶视频模块 — Android APK 版 (Kivy) v2.3
+川叶视频模块 — Android APK 版 (Kivy) v2.8.2
 小川叶原作 | Operit 姐姐移植
 """
 
 import os
 import re
+import json
 import glob
 import subprocess
 import threading
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, unquote
 import yt_dlp
 
 from kivy.app import App
@@ -170,6 +171,17 @@ class VideoAppUI(BoxLayout):
                 color=(0.2, 0.7, 1, 1),
             ))
 
+            # 公告横幅
+            self.announce_label = Label(
+                text="⚠ 因不可抗力(学校开学) 软件无法定期维护 见谅~",
+                font_name=FONT_NAME,
+                font_size="9sp",
+                size_hint=(1, 0.03),
+                halign="center",
+                color=(1, 0.7, 0.3, 1),
+            )
+            self.add_widget(self.announce_label)
+
             # URL 输入
             self.url_input = TextInput(
                 hint_text="粘贴视频链接...",
@@ -247,7 +259,7 @@ class VideoAppUI(BoxLayout):
             )
             self.output_label.bind(texture_size=lambda instance, size: setattr(instance, 'size', size))
 
-            scroll = ScrollView(size_hint=(1, 0.64))
+            scroll = ScrollView(size_hint=(1, 0.61))
             scroll.add_widget(self.output_label)
             self.add_widget(scroll)
 
@@ -305,7 +317,7 @@ class VideoAppUI(BoxLayout):
 
     # ---- 关于弹窗 ----
     def _show_about(self):
-        msg = ("川叶视频模块 v2.8\n\n"
+        msg = ("川叶视频模块 v2.8.2\n\n"
                "作者：小川叶\n"
                "移植：笨蛋姐姐 (Operit)\n"
                "QQ：2075287124\n\n"
@@ -422,7 +434,18 @@ class VideoAppUI(BoxLayout):
         threading.Thread(target=self._do_download, args=(url,), daemon=True).start()
 
     def _do_download(self, url: str):
-        """策略1: yt-dlp提取 + 策略2: 通用网页抓取"""
+        """策略1: yt-dlp提取 + 策略2: 通用网页抓取 + 抖音专用解析"""
+        # 抖音走专用解析通道（yt-dlp在Android上对抖音完全不兼容）
+        platform = detect_platform(url)
+        if platform == "douyin":
+            try:
+                self._try_download_douyin(url)
+                return
+            except Exception as e:
+                Clock.schedule_once(lambda dt, e=e:
+                    self.log(f"[X] 抖音专用解析失败：{e}"))
+                return
+
         try:
             self._try_download_ytdlp(url)
             return
@@ -508,6 +531,159 @@ class VideoAppUI(BoxLayout):
         # 继承 yt-dlp 提取的 http_headers（含 Referer/Cookie，B站必需！）
         extra_headers = best.get('http_headers', {})
         self._stream_download(dl_url, outpath, total, title, extra_headers)
+
+    # ========== 策略1.5：抖音专用解析（纯requests，不靠yt-dlp） ==========
+    def _try_download_douyin(self, url: str):
+        """模拟手机浏览器访问抖音页面，从RENDER_DATA JSON中提取无水印视频地址"""
+        Clock.schedule_once(lambda dt: self._reset_progress())
+        self._set_progress_thread(0, "解析抖音...")
+
+        MOBILE_UA = (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        )
+
+        session = requests.Session()
+        session.headers.update({"User-Agent": MOBILE_UA})
+
+        # 1. 访问短链接 → 跟踪重定向获取真实URL + cookie
+        self._set_progress_thread(5, "获取视频页面...")
+        resp = session.get(url, allow_redirects=True, timeout=20)
+        final_url = resp.url
+        Clock.schedule_once(lambda dt, u=final_url[:80]:
+            self.log(f"[...] 重定向: {u}..."))
+
+        # 2. 从URL提取video_id
+        m = re.search(r'/video/(\d+)', final_url)
+        if not m:
+            m = re.search(r'modal_id=(\d+)', final_url)
+        if not m:
+            # 可能短链接已经失效或格式变化，尝试从响应body找
+            m = re.search(r'video/(\d+)', resp.text)
+        if not m:
+            raise Exception("无法解析抖音视频ID，请检查链接是否有效")
+        video_id = m.group(1)
+        Clock.schedule_once(lambda dt, vid=video_id:
+            self.log(f"[...] 视频ID: {vid}"))
+
+        # 3. 获取包含RENDER_DATA的页面（如果需要重新请求）
+        self._set_progress_thread(10, "提取页面数据...")
+        if '/video/' not in final_url:
+            final_url = f"https://www.douyin.com/video/{video_id}"
+        page_resp = session.get(final_url, timeout=20, headers={
+            "Referer": "https://www.douyin.com/",
+            "User-Agent": MOBILE_UA,
+        })
+
+        # 4. 从HTML中提取RENDER_DATA
+        m = re.search(
+            r'<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)</script>',
+            page_resp.text
+        )
+        if not m:
+            # 备用：尝试匹配 window._ROUTER_DATA
+            m2 = re.search(
+                r'window\._ROUTER_DATA\s*=\s*({.+?});?\s*</script>',
+                page_resp.text, re.DOTALL
+            )
+            if m2:
+                try:
+                    data = json.loads(m2.group(1))
+                except Exception:
+                    raise Exception("解析_ROUTER_DATA JSON失败")
+            else:
+                raise Exception("未找到RENDER_DATA（页面结构可能已变化）")
+        else:
+            # RENDER_DATA是URL-encoded JSON
+            render_encoded = m.group(1)
+            try:
+                data = json.loads(unquote(render_encoded))
+            except Exception as e:
+                raise Exception(f"解析RENDER_DATA失败: {e}")
+
+        # 5. 递归搜索视频URL
+        self._set_progress_thread(15, "搜索视频地址...")
+        video_info = self._search_douyin_video(data)
+        if not video_info:
+            raise Exception("未在页面数据中找到视频地址")
+
+        title = video_info.get('title', f"抖音_{video_id}")
+        # 优先无水印地址
+        dl_url = (
+            video_info.get('download_addr')
+            or video_info.get('play_addr')
+            or video_info.get('bit_rate')
+        )
+        if not dl_url:
+            raise Exception("未找到可下载的视频URL")
+
+        # 如果是列表（url_list），取第一个
+        if isinstance(dl_url, list):
+            dl_url = dl_url[0]
+        # 去水印：替换watermark=1为watermark=0，或移除wm后缀
+        dl_url = dl_url.replace('watermark=1', 'watermark=0')
+        dl_url = dl_url.replace('playwm', 'play')
+
+        outpath = os.path.join(_DOWNLOAD_DIR, f"dy_{video_id}.mp4")
+
+        Clock.schedule_once(lambda dt, t=title, v=video_id:
+            self.log(f"[...] 抖音: {t}"))
+        self._stream_download(dl_url, outpath, 0, title, {
+            "Referer": "https://www.douyin.com/",
+            "User-Agent": MOBILE_UA,
+        })
+
+    def _search_douyin_video(self, obj, depth=0):
+        """递归搜索抖音RENDER_DATA中的视频信息"""
+        if depth > 15 or obj is None:
+            return None
+
+        if isinstance(obj, dict):
+            # 查找包含play_addr的字典
+            if 'video' in obj and isinstance(obj['video'], dict):
+                v = obj['video']
+                result = {}
+                # play_addr
+                pa = v.get('play_addr', {})
+                if isinstance(pa, dict) and 'url_list' in pa:
+                    result['play_addr'] = pa['url_list'][0] if pa['url_list'] else None
+                # download_addr（可能无水印）
+                da = v.get('download_addr', {})
+                if isinstance(da, dict) and 'url_list' in da:
+                    result['download_addr'] = da['url_list'][0] if da['url_list'] else None
+                # bit_rate（高清）
+                br = v.get('bit_rate', [])
+                if br and isinstance(br, list) and len(br) > 0:
+                    b0 = br[0]
+                    if isinstance(b0, dict) and 'play_addr' in b0:
+                        bpa = b0['play_addr']
+                        if isinstance(bpa, dict) and 'url_list' in bpa:
+                            result['bit_rate'] = bpa['url_list'][0] if bpa['url_list'] else None
+                # title
+                if 'desc' in obj:
+                    result['title'] = obj['desc']
+                elif 'title' in obj:
+                    result['title'] = obj['title']
+
+                if result.get('play_addr') or result.get('download_addr'):
+                    return result
+
+            # 递归搜索所有值
+            for key, value in obj.items():
+                found = self._search_douyin_video(value, depth + 1)
+                if found:
+                    # 补充title
+                    if 'desc' in obj and not found.get('title'):
+                        found['title'] = obj['desc']
+                    return found
+
+        elif isinstance(obj, list):
+            for item in obj:
+                found = self._search_douyin_video(item, depth + 1)
+                if found:
+                    return found
+
+        return None
 
     # ========== 策略2：通用网页抓取 mp4/video ==========
     def _try_download_generic(self, url: str):
