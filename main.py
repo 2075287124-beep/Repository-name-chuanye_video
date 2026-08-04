@@ -6,6 +6,7 @@
 import os
 import re
 import glob
+import subprocess
 import threading
 import requests
 from bs4 import BeautifulSoup
@@ -203,11 +204,20 @@ class VideoAppUI(BoxLayout):
             paste_btn = Button(
                 text="粘贴",
                 font_name=FONT_NAME,
-                font_size="14sp",
+                font_size="13sp",
                 background_color=(0.5, 0.5, 0.5, 1),
             )
             paste_btn.bind(on_press=self._safe_on_paste)
             btn_box.add_widget(paste_btn)
+
+            about_btn = Button(
+                text="关于",
+                font_name=FONT_NAME,
+                font_size="13sp",
+                background_color=(0.6, 0.4, 0.8, 1),
+            )
+            about_btn.bind(on_press=self._safe_on_about)
+            btn_box.add_widget(about_btn)
 
             self.add_widget(btn_box)
 
@@ -271,6 +281,37 @@ class VideoAppUI(BoxLayout):
             self.on_download(instance)
         except Exception as e:
             self.log(f"[X] 下载异常: {e}")
+
+    def _safe_on_about(self, instance):
+        try:
+            self._show_about()
+        except Exception as e:
+            self.log(f"[X] 关于异常: {e}")
+
+    # ---- 打开文件夹 ----
+    def _open_folder(self, *args):
+        try:
+            subprocess.run([
+                'am', 'start', '-a', 'android.intent.action.VIEW',
+                '-d', f'file://{_DOWNLOAD_DIR}',
+                '-t', 'resource/folder',
+            ], check=False, capture_output=True)
+        except Exception:
+            try:
+                # 备用方案
+                os.system(f'am start -a android.intent.action.VIEW -d "file://{_DOWNLOAD_DIR}"')
+            except Exception:
+                pass
+
+    # ---- 关于弹窗 ----
+    def _show_about(self):
+        msg = ("川叶视频模块 v2.8\n\n"
+               "作者：小川叶大人\n"
+               "移植：笨蛋ai姐姐 (Operit)\n"
+               "QQ：2075287124\n\n"
+               "支持：B站 抖音 快手 小红书\n"
+               "       + 通用网页视频抓取")
+        self._show_popup("关于", msg, show_open=False)
 
     # ---- 进度条更新 ----
     def _on_progress(self, d: dict):
@@ -549,14 +590,21 @@ class VideoAppUI(BoxLayout):
         Clock.schedule_once(lambda dt, v=value, t=text:
             self._set_progress(v, t))
 
-    def _show_popup(self, title: str, msg: str):
+    def _show_popup(self, title: str, msg: str, show_open: bool = True):
         try:
             content = BoxLayout(orientation="vertical", padding=10)
             content.add_widget(Label(text=msg, font_name=FONT_NAME))
-            btn = Button(text="好的", font_name=FONT_NAME, size_hint=(1, 0.3))
-            popup = Popup(title=title, content=content, size_hint=(0.8, 0.4))
-            btn.bind(on_press=popup.dismiss)
-            content.add_widget(btn)
+            btn_box = BoxLayout(size_hint=(1, 0.35), spacing=8)
+            ok_btn = Button(text="好的", font_name=FONT_NAME)
+            popup = Popup(title=title, content=content, size_hint=(0.8, 0.45))
+            ok_btn.bind(on_press=popup.dismiss)
+            btn_box.add_widget(ok_btn)
+            if show_open:
+                open_btn = Button(text="打开文件夹", font_name=FONT_NAME,
+                                  background_color=(0.2, 0.6, 1, 1))
+                open_btn.bind(on_press=lambda x: self._open_folder())
+                btn_box.add_widget(open_btn)
+            content.add_widget(btn_box)
             popup.open()
         except Exception:
             pass
