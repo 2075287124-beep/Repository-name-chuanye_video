@@ -302,18 +302,39 @@ class VideoAppUI(BoxLayout):
 
     # ---- 打开文件夹 ----
     def _open_folder(self, *args):
+        """使用 Android Intent 打开下载文件夹（pyjnius + fallback）"""
         try:
-            subprocess.run([
-                'am', 'start', '-a', 'android.intent.action.VIEW',
-                '-d', f'file://{_DOWNLOAD_DIR}',
-                '-t', 'resource/folder',
-            ], check=False, capture_output=True)
+            # 策略1：pyjnius 原生调用
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+
+            intent = Intent(Intent.ACTION_VIEW)
+            intent.setDataAndType(
+                Uri.parse(f'file://{_DOWNLOAD_DIR}'),
+                'resource/folder'
+            )
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            PythonActivity.mActivity.startActivity(intent)
         except Exception:
+            # 策略2：shell 备用（用 shell=True 确保 PATH 正确）
             try:
-                # 备用方案
-                os.system(f'am start -a android.intent.action.VIEW -d "file://{_DOWNLOAD_DIR}"')
+                import subprocess as sp
+                sp.run(
+                    f'am start -a android.intent.action.VIEW '
+                    f'-d "file://{_DOWNLOAD_DIR}" -t resource/folder',
+                    shell=True, check=False, capture_output=True, timeout=5
+                )
             except Exception:
-                pass
+                # 策略3：尝试 content URI（Android 10+）
+                try:
+                    sp.run([
+                        'am', 'start', '-a', 'android.intent.action.VIEW',
+                        '-d', 'content://com.android.externalstorage.documents/root/primary/Download',
+                    ], check=False, capture_output=True, timeout=5)
+                except Exception:
+                    pass
 
     # ---- 关于弹窗 ----
     def _show_about(self):
