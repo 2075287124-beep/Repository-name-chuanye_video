@@ -300,34 +300,45 @@ class VideoAppUI(BoxLayout):
         except Exception as e:
             self.log(f"[X] 关于异常: {e}")
 
-    # ---- 打开文件夹 ----
-    def _open_folder(self, *args):
-        """用系统文件管理器打开下载文件夹"""
-        import os as _os
+    # ---- 复制/打开文件夹 ----
+    def _copy_path(self, *args):
+        """尝试用 content:// URI 打开文件夹，失败则复制路径"""
         path = _DOWNLOAD_DIR
+        opened = False
 
-        # 多策略尝试，os.system 在 Kivy/Android 中最可靠
-        commands = [
-            # 策略A：通用 Intent（最兼容旧版 Android）
-            f'am start -a android.intent.action.VIEW -d "file://{path}" -t resource/folder &',
-            # 策略B：不指定 MIME，让系统自己判断
-            f'am start -a android.intent.action.VIEW -d "file://{path}" &',
-            # 策略C：直接调文件管理器（Android 7+）
-            f'am start -n com.android.documentsui/.files.FilesActivity &',
-        ]
-
-        for cmd in commands:
-            try:
-                _os.system(cmd)
-            except Exception:
-                continue
-
-        # 兜底：把路径复制到剪贴板，至少用户能手动导航
+        # 策略：pyjnius + content:// URI（绕过 file:// 的 Android 7+ 限制）
         try:
-            from kivy.core.clipboard import Clipboard
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+
+            # 用 ExternalStorage Provider 的 content URI
+            content_uri = Uri.parse(
+                'content://com.android.externalstorage.documents/tree/primary%3ADownload'
+            )
+
+            intent = Intent(Intent.ACTION_VIEW)
+            intent.setDataAndType(content_uri, 'resource/folder')
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            PythonActivity.mActivity.startActivity(intent)
+            opened = True
+        except Exception:
+            pass
+
+        # 无论是否打开成功，都复制路径到剪贴板
+        try:
             Clipboard.copy(path)
         except Exception:
             pass
+
+        # 如果打开失败，弹窗提示
+        if not opened:
+            self._show_popup(
+                "路径已复制 ✅",
+                f"文件保存在：\n{path}\n\n路径已复制，请手动打开文件管理器",
+                show_open=False,
+            )
 
     # ---- 关于弹窗 ----
     def _show_about(self):
@@ -805,10 +816,10 @@ class VideoAppUI(BoxLayout):
             ok_btn.bind(on_press=popup.dismiss)
             btn_box.add_widget(ok_btn)
             if show_open:
-                open_btn = Button(text="打开文件夹", font_name=FONT_NAME,
+                copy_btn = Button(text="复制路径", font_name=FONT_NAME,
                                   background_color=(0.2, 0.6, 1, 1))
-                open_btn.bind(on_press=lambda x: self._open_folder())
-                btn_box.add_widget(open_btn)
+                copy_btn.bind(on_press=lambda x: self._copy_path())
+                btn_box.add_widget(copy_btn)
             content.add_widget(btn_box)
             popup.open()
         except Exception:
