@@ -342,27 +342,37 @@ class VideoAppUI(BoxLayout):
 
     # ---- 打开已下载的文件（系统选择器） ----
     def _open_file(self, filepath, *args):
-        """调起系统'打开方式'菜单——可选择播放器/云盘/文件管理器"""
+        """调起系统'打开方式'菜单——通过 FileProvider 生成 content:// URI"""
         try:
-            from jnius import autoclass
+            from jnius import autoclass, cast
+            from android import mActivity
+
             Intent = autoclass('android.content.Intent')
-            Uri = autoclass('android.net.Uri')
             File = autoclass('java.io.File')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            FileProvider = autoclass('androidx.core.content.FileProvider')
+            String = autoclass('java.lang.String')
 
+            # 获取应用上下文
+            context = mActivity.getApplicationContext()
+            package_name = context.getPackageName()
+
+            # 通过 FileProvider 生成 content:// URI（Android 7+ 必需！）
             file_obj = File(filepath)
-            file_uri = Uri.fromFile(file_obj)
+            authority = String(package_name + ".fileprovider")
+            file_uri = FileProvider.getUriForFile(context, authority, file_obj)
 
+            # ACTION_VIEW 打开视频
             intent = Intent(Intent.ACTION_VIEW)
             intent.setDataAndType(file_uri, 'video/*')
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-            # createChooser 强制弹出"打开方式"选择器
+            # 强制弹出选择器
             chooser = Intent.createChooser(intent, '选择应用')
-            PythonActivity.mActivity.startActivity(chooser)
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            mActivity.startActivity(chooser)
         except Exception:
-            # fallback: 至少复制路径
+            # fallback: 复制路径
             try:
                 Clipboard.copy(filepath)
             except Exception:

@@ -32,11 +32,16 @@ android.ndk = 25b
 android.accept_sdk_license = True
 
 # Gradle 兼容
-#android.gradle_dependencies = com.android.tools.build:gradle:7.3.3
+# p4a 会自动选择合适的 Gradle 版本，无需手动指定
 
 # 图标和方向
 orientation = portrait
 fullscreen = 0
+
+# FileProvider 配置（Android 7+ 分享文件必需，否则 file:// URI 被拦截）
+android.add_resources = res
+android.meta_data = android.support.FILE_PROVIDER_PATHS=@xml/file_paths
+android.providers = androidx.core.content.FileProvider;chuanye_video.fileprovider;false;true
 
 # 日志
 log_level = 2
