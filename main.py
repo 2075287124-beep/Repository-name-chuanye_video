@@ -302,39 +302,32 @@ class VideoAppUI(BoxLayout):
 
     # ---- 打开文件夹 ----
     def _open_folder(self, *args):
-        """使用 Android Intent 打开下载文件夹（pyjnius + fallback）"""
-        try:
-            # 策略1：pyjnius 原生调用
-            from jnius import autoclass
-            Intent = autoclass('android.content.Intent')
-            Uri = autoclass('android.net.Uri')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        """用系统文件管理器打开下载文件夹"""
+        import os as _os
+        path = _DOWNLOAD_DIR
 
-            intent = Intent(Intent.ACTION_VIEW)
-            intent.setDataAndType(
-                Uri.parse(f'file://{_DOWNLOAD_DIR}'),
-                'resource/folder'
-            )
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            PythonActivity.mActivity.startActivity(intent)
-        except Exception:
-            # 策略2：shell 备用（用 shell=True 确保 PATH 正确）
+        # 多策略尝试，os.system 在 Kivy/Android 中最可靠
+        commands = [
+            # 策略A：通用 Intent（最兼容旧版 Android）
+            f'am start -a android.intent.action.VIEW -d "file://{path}" -t resource/folder &',
+            # 策略B：不指定 MIME，让系统自己判断
+            f'am start -a android.intent.action.VIEW -d "file://{path}" &',
+            # 策略C：直接调文件管理器（Android 7+）
+            f'am start -n com.android.documentsui/.files.FilesActivity &',
+        ]
+
+        for cmd in commands:
             try:
-                import subprocess as sp
-                sp.run(
-                    f'am start -a android.intent.action.VIEW '
-                    f'-d "file://{_DOWNLOAD_DIR}" -t resource/folder',
-                    shell=True, check=False, capture_output=True, timeout=5
-                )
+                _os.system(cmd)
             except Exception:
-                # 策略3：尝试 content URI（Android 10+）
-                try:
-                    sp.run([
-                        'am', 'start', '-a', 'android.intent.action.VIEW',
-                        '-d', 'content://com.android.externalstorage.documents/root/primary/Download',
-                    ], check=False, capture_output=True, timeout=5)
-                except Exception:
-                    pass
+                continue
+
+        # 兜底：把路径复制到剪贴板，至少用户能手动导航
+        try:
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(path)
+        except Exception:
+            pass
 
     # ---- 关于弹窗 ----
     def _show_about(self):
