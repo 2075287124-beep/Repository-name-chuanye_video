@@ -41,7 +41,7 @@ fullscreen = 0
 # FileProvider 配置（Android 7+ 分享文件必需，否则 file:// URI 被拦截）
 android.add_resources = res
 android.meta_data = android.support.FILE_PROVIDER_PATHS=@xml/file_paths
-android.providers = androidx.core.content.FileProvider;chuanye_video.fileprovider;false;true
+android.providers = androidx.core.content.FileProvider:chuanye_video.fileprovider:false:true
 
 # 日志
 log_level = 2
