@@ -340,6 +340,39 @@ class VideoAppUI(BoxLayout):
                 show_open=False,
             )
 
+    # ---- 打开已下载的文件（系统选择器） ----
+    def _open_file(self, filepath, *args):
+        """调起系统'打开方式'菜单——可选择播放器/云盘/文件管理器"""
+        try:
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            File = autoclass('java.io.File')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+
+            file_obj = File(filepath)
+            file_uri = Uri.fromFile(file_obj)
+
+            intent = Intent(Intent.ACTION_VIEW)
+            intent.setDataAndType(file_uri, 'video/*')
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+            # createChooser 强制弹出"打开方式"选择器
+            chooser = Intent.createChooser(intent, '选择应用')
+            PythonActivity.mActivity.startActivity(chooser)
+        except Exception:
+            # fallback: 至少复制路径
+            try:
+                Clipboard.copy(filepath)
+            except Exception:
+                pass
+            self._show_popup(
+                "无法打开",
+                f"路径已复制到剪贴板：\n{filepath}",
+                show_open=False,
+            )
+
     # ---- 关于弹窗 ----
     def _show_about(self):
         msg = ("川叶视频模块 v2.8.2\n\n"
@@ -800,13 +833,13 @@ class VideoAppUI(BoxLayout):
         Clock.schedule_once(lambda dt, p=outpath, s=size_mb:
             self.log(f"[OK] 下载完成 ({s:.1f}MB)：{p}"))
         Clock.schedule_once(lambda dt, t=title, p=outpath:
-            self._show_popup("下载完成", f"{t}\n已保存到：\n{p}"))
+            self._show_popup("下载完成", f"{t}\n已保存到：\n{p}", filepath=p))
 
     def _set_progress_thread(self, value: int, text: str):
         Clock.schedule_once(lambda dt, v=value, t=text:
             self._set_progress(v, t))
 
-    def _show_popup(self, title: str, msg: str, show_open: bool = True):
+    def _show_popup(self, title: str, msg: str, show_open: bool = True, filepath: str = None):
         try:
             content = BoxLayout(orientation="vertical", padding=10)
             content.add_widget(Label(text=msg, font_name=FONT_NAME))
@@ -820,6 +853,11 @@ class VideoAppUI(BoxLayout):
                                   background_color=(0.2, 0.6, 1, 1))
                 copy_btn.bind(on_press=lambda x: self._copy_path())
                 btn_box.add_widget(copy_btn)
+            if filepath:
+                open_btn = Button(text="打开文件", font_name=FONT_NAME,
+                                  background_color=(0.2, 0.8, 0.4, 1))
+                open_btn.bind(on_press=lambda x, fp=filepath: self._open_file(fp))
+                btn_box.add_widget(open_btn)
             content.add_widget(btn_box)
             popup.open()
         except Exception:
