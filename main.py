@@ -352,12 +352,12 @@ class VideoAppUI(BoxLayout):
             Intent = autoclass('android.content.Intent')
             File = autoclass('java.io.File')
             FileProvider = autoclass('androidx.core.content.FileProvider')
-            String = autoclass('java.lang.String')
 
             context = mActivity.getApplicationContext()
             package_name = context.getPackageName()
             file_obj = File(filepath)
-            authority = String(package_name + ".fileprovider")
+            # ✅ authority直接传Python字符串，pyjnius自动转java.lang.String
+            authority = package_name + ".fileprovider"
             file_uri = FileProvider.getUriForFile(context, authority, file_obj)
 
             intent = Intent(Intent.ACTION_VIEW)
@@ -372,7 +372,7 @@ class VideoAppUI(BoxLayout):
         except Exception as e1:
             self.log(f"[!] PlanA(FileProvider)失败: {str(e1)[:60]}")
 
-        # ===== 保险2：ACTION_SEND 分享模式（有时能绕过 file:// 限制） =====
+        # ===== 保险2：ACTION_VIEW + Uri.fromFile（不用EXTRA_STREAM绕过类型检查） =====
         try:
             from jnius import autoclass
             from android import mActivity
@@ -384,9 +384,9 @@ class VideoAppUI(BoxLayout):
             file_obj = File(filepath)
             file_uri = Uri.fromFile(file_obj)
 
-            intent = Intent(Intent.ACTION_SEND)
-            intent.setType('video/*')
-            intent.putExtra(Intent.EXTRA_STREAM, file_uri)
+            intent = Intent(Intent.ACTION_VIEW)
+            # ✅ 用setDataAndType而不是putExtra(EXTRA_STREAM)，避免Uri类型检查
+            intent.setDataAndType(file_uri, 'video/*')
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
@@ -394,7 +394,7 @@ class VideoAppUI(BoxLayout):
             mActivity.startActivity(chooser)
             return  # ✅ 成功！
         except Exception as e2:
-            self.log(f"[!] PlanB(ACTION_SEND)失败: {str(e2)[:60]}")
+            self.log(f"[!] PlanB(ACTION_VIEW)失败: {str(e2)[:60]}")
 
         # ===== 保险3：shell am start 命令（系统级调用，权限更宽） =====
         try:
