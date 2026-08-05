@@ -1,5 +1,5 @@
 """
-川叶视频模块 — Android APK 版 (Kivy) v2.8.2
+川叶视频模块 — Android APK 版 (Kivy) v2.8.2-final
 小川叶原作 | Operit 姐姐移植
 """
 
@@ -173,7 +173,7 @@ class VideoAppUI(BoxLayout):
 
             # 公告横幅
             self.announce_label = Label(
-                text="⚠ 因不可抗力(学校开学) 软件无法定期维护 见谅~",
+                text="⚠「打开文件」功能暂不可用 请移步相册/文件管理器查找 | ZNO",
                 font_name=FONT_NAME,
                 font_size="9sp",
                 size_hint=(1, 0.03),
@@ -425,12 +425,15 @@ class VideoAppUI(BoxLayout):
 
     # ---- 关于弹窗 ----
     def _show_about(self):
-        msg = ("川叶视频模块 v2.8.2\n\n"
+        msg = ("川叶视频模块 v2.8.2-final\n\n"
                "作者：小川叶\n"
                "移植：笨蛋姐姐 (Operit)\n"
                "QQ：2075287124\n\n"
                "支持：B站 抖音 快手 小红书\n"
-               "       + 通用网页视频抓取")
+               "       + 通用网页视频抓取\n\n"
+               "⚠ 已知问题：'打开文件'功能\n"
+               "   因Android文件权限限制暂不可用\n"
+               "   请移步相册/文件管理器查找下载文件")
         self._show_popup("关于", msg, show_open=False)
 
     # ---- 进度条更新 ----
@@ -883,7 +886,7 @@ class VideoAppUI(BoxLayout):
         Clock.schedule_once(lambda dt, p=outpath, s=size_mb:
             self.log(f"[OK] 下载完成 ({s:.1f}MB)：{p}"))
         Clock.schedule_once(lambda dt, t=title, p=outpath:
-            self._show_popup("下载完成", f"{t}\n已保存到：\n{p}", filepath=p))
+            self._show_popup("下载完成", f"{t}\n已保存到：\n{p}\n\n请移步相册或文件管理器查找"))
 
     def _set_progress_thread(self, value: int, text: str):
         Clock.schedule_once(lambda dt, v=value, t=text:
