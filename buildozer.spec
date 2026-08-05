@@ -38,10 +38,11 @@ android.accept_sdk_license = True
 orientation = portrait
 fullscreen = 0
 
-# FileProvider 配置（Android 7+ 分享文件必需，否则 file:// URI 被拦截）
+# FileProvider 配置（Android 7+ 分享文件必需）
+# ↑ p4a 的 android.providers 字段有兼容性问题，改用 extra_manifest_entries 直接注入 AndroidManifest
 android.add_resources = res
-android.meta_data = android.support.FILE_PROVIDER_PATHS=@xml/file_paths
-android.providers = androidx.core.content.FileProvider:chuanye_video.fileprovider:false:true
+android.gradle_dependencies = androidx.core:core:1.12.0
+android.extra_manifest_entries = <provider android:name="androidx.core.content.FileProvider" android:authorities="chuanye_video.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider>
 
 # 日志
 log_level = 2
