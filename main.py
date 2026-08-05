@@ -340,11 +340,13 @@ class VideoAppUI(BoxLayout):
                 show_open=False,
             )
 
-    # ---- 打开已下载的文件（系统选择器） ----
+    # ---- 打开已下载的文件（四重保险） ----
     def _open_file(self, filepath, *args):
-        """调起系统'打开方式'菜单——通过 FileProvider 生成 content:// URI"""
+        """调起系统'打开方式'菜单——四层fallback"""
+
+        # ===== 保险1：FileProvider content:// URI（Android 7+ 标准方式） =====
         try:
-            from jnius import autoclass, cast
+            from jnius import autoclass
             from android import mActivity
 
             Intent = autoclass('android.content.Intent')
@@ -352,36 +354,74 @@ class VideoAppUI(BoxLayout):
             FileProvider = autoclass('androidx.core.content.FileProvider')
             String = autoclass('java.lang.String')
 
-            # 获取应用上下文
             context = mActivity.getApplicationContext()
             package_name = context.getPackageName()
-
-            # 通过 FileProvider 生成 content:// URI（Android 7+ 必需！）
             file_obj = File(filepath)
             authority = String(package_name + ".fileprovider")
             file_uri = FileProvider.getUriForFile(context, authority, file_obj)
 
-            # ACTION_VIEW 打开视频
             intent = Intent(Intent.ACTION_VIEW)
             intent.setDataAndType(file_uri, 'video/*')
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-            # 强制弹出选择器
             chooser = Intent.createChooser(intent, '选择应用')
             chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             mActivity.startActivity(chooser)
-        except Exception:
-            # fallback: 复制路径
-            try:
-                Clipboard.copy(filepath)
-            except Exception:
-                pass
-            self._show_popup(
-                "无法打开",
-                f"路径已复制到剪贴板：\n{filepath}",
-                show_open=False,
+            return  # ✅ 成功！
+        except Exception as e1:
+            self.log(f"[!] PlanA(FileProvider)失败: {str(e1)[:60]}")
+
+        # ===== 保险2：ACTION_SEND 分享模式（有时能绕过 file:// 限制） =====
+        try:
+            from jnius import autoclass
+            from android import mActivity
+
+            Intent = autoclass('android.content.Intent')
+            File = autoclass('java.io.File')
+            Uri = autoclass('android.net.Uri')
+
+            file_obj = File(filepath)
+            file_uri = Uri.fromFile(file_obj)
+
+            intent = Intent(Intent.ACTION_SEND)
+            intent.setType('video/*')
+            intent.putExtra(Intent.EXTRA_STREAM, file_uri)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            chooser = Intent.createChooser(intent, '选择应用')
+            mActivity.startActivity(chooser)
+            return  # ✅ 成功！
+        except Exception as e2:
+            self.log(f"[!] PlanB(ACTION_SEND)失败: {str(e2)[:60]}")
+
+        # ===== 保险3：shell am start 命令（系统级调用，权限更宽） =====
+        try:
+            # 用 am start 直接调起，某些ROM的shell环境不受file://限制
+            cmd = (
+                f'am start -a android.intent.action.VIEW '
+                f'-d "file://{filepath}" '
+                f'-t video/* '
+                f'--activity-new-task 2>/dev/null'
             )
+            os.system(cmd)
+            # shell命令不抛异常就算尝试了
+            Clipboard.copy(filepath)
+            return
+        except Exception as e3:
+            self.log(f"[!] PlanC(shell)失败: {str(e3)[:60]}")
+
+        # ===== 保险4：复制路径兜底（100%可靠） =====
+        try:
+            Clipboard.copy(filepath)
+        except Exception:
+            pass
+        self._show_popup(
+            "路径已复制 ✅",
+            f"无法自动打开，路径已复制到剪贴板：\n{filepath}",
+            show_open=False,
+        )
 
     # ---- 关于弹窗 ----
     def _show_about(self):

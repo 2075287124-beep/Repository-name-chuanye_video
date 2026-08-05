@@ -25,7 +25,7 @@ android.arch = arm64-v8a
 
 # 最低 API
 android.minapi = 21
-android.api = 33
+android.api = 34
 android.ndk = 25b
 
 # SDK 许可
