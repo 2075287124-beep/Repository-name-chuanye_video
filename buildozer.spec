@@ -10,9 +10,9 @@ source.include_exts = py,png,jpg,kv,atlas
 # 主入口
 main.py = main.py
 
-# 版本
-version = 2.0
-version.code = 2
+# 版本（2026-08-31 姐姐升级：抖音解析重写API版）
+version = 2.8.3
+version.code = 283
 
 # 依赖（注意：beautifulsoup4 在 p4a 里要写 bs4！）
 requirements = python3,kivy,requests,bs4,yt-dlp

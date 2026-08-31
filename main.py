@@ -678,142 +678,132 @@ class VideoAppUI(BoxLayout):
             pass
 
     def _try_download_douyin(self, url: str):
-        """模拟浏览器访问抖音（分享页优先），提取无水印视频地址"""
+        """抖音API方案（2026新版）：
+        拿ttwid+s_v_web_id → 请求 aweme/detail 接口 → 提取无水印地址"""
         Clock.schedule_once(lambda dt: self._reset_progress())
         self._set_progress_thread(0, "解析抖音...")
 
-        MOBILE_UA = (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-        )
         DESKTOP_UA = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
         session = requests.Session()
-        session.headers.update({"User-Agent": MOBILE_UA})
+        session.headers.update({"User-Agent": DESKTOP_UA})
 
-        # 风控准备：ttwid
-        self._set_progress_thread(3, "风控准备(ttwid)...")
+        # 1) 拿ttwid + __ac_nonce
+        self._set_progress_thread(3, "准备风控身份...")
         self._ensure_ttwid(session)
 
-        # 1. 访问短链接 → 跟踪重定向获取真实URL + cookie
-        self._set_progress_thread(5, "获取视频页面...")
+        # 2) 伪造 s_v_web_id（服务器不校验，只查存在）
+        try:
+            import time as _t, random as _r
+            fake = hex(int(_t.time() * 1000))[2:] + ''.join(
+                _r.choice('0123456789abcdef') for _ in range(14))
+            session.cookies.set('s_v_web_id', fake, domain='.douyin.com')
+        except Exception:
+            pass
+
+        # 3) 提取视频ID（支持 v.douyin.com 短链 / share页 / video页）
+        self._set_progress_thread(5, "获取视频ID...")
         resp = session.get(url, allow_redirects=True, timeout=20)
         final_url = resp.url
-        Clock.schedule_once(lambda dt, u=final_url[:80]:
-            self.log(f"[...] 重定向: {u}..."))
-
-        # 2. 从URL提取video_id
-        m = re.search(r'/video/(\d+)', final_url)
+        m = re.search(r'(?:/video/|modal_id=|/share/video/)(\d+)', final_url)
         if not m:
-            m = re.search(r'modal_id=(\d+)', final_url)
-        if not m:
-            m = re.search(r'video/(\d+)', resp.text)
+            m = re.search(r'/video/(\d+)', resp.text)
         if not m:
             m = re.search(r'/(\d{10,})', final_url)
         if not m:
             raise Exception("无法解析抖音视频ID，请检查链接是否有效")
         video_id = m.group(1)
-        Clock.schedule_once(lambda dt, vid=video_id:
-            self.log(f"[...] 视频ID: {vid}"))
 
-        # 3. 优先请求「分享页」（https://www.iesdouyin.com/share/video/ID/）
-        #    比 www.douyin.com/video/ 风控更松；拿不到再回退主站
-        self._set_progress_thread(10, "提取页面数据...")
-        page_html = None
-        headers_base = {
-            "Referer": "https://www.douyin.com/",
-            "User-Agent": DESKTOP_UA,
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }
-        # 3a. 分享页（桌面UA）—— 注意部分手机网络需 https
-        for share_url in (
-            f"https://www.iesdouyin.com/share/video/{video_id}/",
-            f"https://www.douyin.com/video/{video_id}",
-        ):
+        # 4) 请求 detail 接口（关键！）带重试（防临时限流）
+        self._set_progress_thread(10, "请求视频数据...")
+        import time as _time
+        api = None
+        for attempt in range(3):
             try:
-                r = session.get(share_url, timeout=20, headers=headers_base)
-                if r.status_code == 200 and r.text:
-                    page_html = r.text
+                api = session.get(
+                    "https://www.douyin.com/aweme/v1/web/aweme/detail/",
+                    params={"aweme_id": video_id},
+                    headers={
+                        "Referer": "https://www.douyin.com/",
+                        "User-Agent": DESKTOP_UA,
+                        "Accept-Language": "zh-CN,zh;q=0.9",
+                    },
+                    timeout=20,
+                )
+                if api.status_code == 200 and (api.text or "").strip():
                     break
+                api = None
             except Exception:
-                continue
-        if not page_html:
-            raise Exception("抖音页面访问失败（可能是风控拦截）")
+                api = None
+            if attempt < 2:
+                Clock.schedule_once(lambda dt, n=attempt + 2:
+                    self.log(f"[...] 接口繁忙，重试({n}/3)..."))
+                _time.sleep(2 + attempt * 2)
+        if api is None:
+            raise Exception("接口多次请求失败（可能被限流，稍后再试）")
+        try:
+            data = api.json()
+        except Exception:
+            raise Exception(f"接口返回非JSON: {api.status_code} {api.text[:80]}")
+        ad = data.get("aweme_detail") or {}
+        if not ad:
+            raise Exception("接口未返回视频数据（尝试重试：抖音URL有时效）")
 
-        # 4. 从HTML中提取数据：RENDER_DATA → _ROUTER_DATA → 任意script JSON兜底
-        data = None
-        # 4a. RENDER_DATA（URL-encoded JSON）
-        m = re.search(
-            r'<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)</script>',
-            page_html
-        )
-        if m:
-            try:
-                data = json.loads(unquote(m.group(1)))
-            except Exception:
-                data = None
-        # 4b. window._ROUTER_DATA
-        if data is None:
-            m2 = re.search(
-                r'window\._ROUTER_DATA\s*=\s*({.+?});?\s*</script>',
-                page_html, re.DOTALL
-            )
-            if m2:
-                try:
-                    data = json.loads(m2.group(1))
-                except Exception:
-                    data = None
-        # 4c. __pace_f 或 内嵌JSON兜底（新页面结构）
-        if data is None:
-            m3 = re.search(r'<script[^>]*id="__pace_f"[^>]*>([^<]+)</script>', page_html)
-            if m3:
-                try:
-                    data = json.loads(m3.group(1))
-                except Exception:
-                    data = None
-        if data is None:
-            m4 = re.search(r'window\.IDL_FLOW\s*=\s*({.+?});?', page_html, re.DOTALL)
-            if m4:
-                try:
-                    data = json.loads(m4.group(1))
-                except Exception:
-                    data = None
-        if data is None:
-            raise Exception("未找到页面数据（抖音结构又变了？）")
-
-        # 5. 递归搜索视频URL
-        self._set_progress_thread(15, "搜索视频地址...")
-        video_info = self._search_douyin_video(data)
-        if not video_info:
-            raise Exception("未在页面数据中找到视频地址")
-
-        title = video_info.get('title', f"抖音_{video_id}")
-        # 优先无水印地址
-        dl_url = (
-            video_info.get('download_addr')
-            or video_info.get('play_addr')
-            or video_info.get('bit_rate')
-        )
+        # 5) 提取无水印地址（play_addr → download_addr → bit_rate）
+        video = ad.get("video", {}) or {}
+        dl_url = None
+        for key in ("play_addr", "download_addr", "bit_rate"):
+            node = video.get(key)
+            if isinstance(node, list) and node:
+                b0 = node[0]
+                if isinstance(b0, dict):
+                    node = b0.get("play_addr") or b0
+            if isinstance(node, dict):
+                ul = node.get("url_list") or []
+                if ul:
+                    dl_url = ul[0]
+                    break
         if not dl_url:
-            raise Exception("未找到可下载的视频URL")
+            # 兜底：递归找 url_list
+            dl_url = self._find_first_url_list(data)
+        if not dl_url:
+            raise Exception("未找到视频下载地址")
 
-        if isinstance(dl_url, list):
-            dl_url = dl_url[0]
         dl_url = dl_url.replace('watermark=1', 'watermark=0')
         dl_url = dl_url.replace('playwm', 'play')
 
+        title = ad.get("desc") or f"抖音_{video_id}"
         outpath = os.path.join(_DOWNLOAD_DIR, f"dy_{video_id}.mp4")
 
-        Clock.schedule_once(lambda dt, t=title, v=video_id:
+        Clock.schedule_once(lambda dt, t=title[:40], v=video_id:
             self.log(f"[...] 抖音: {t}"))
         self._stream_download(dl_url, outpath, 0, title, {
             "Referer": "https://www.douyin.com/",
-            "User-Agent": MOBILE_UA,
+            "User-Agent": DESKTOP_UA,
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
+
+    def _find_first_url_list(self, obj, depth=0):
+        """深度优先找第一个 url_list 里的 https 地址"""
+        if depth > 20 or obj is None:
+            return None
+        if isinstance(obj, dict):
+            ul = obj.get("url_list")
+            if isinstance(ul, list) and ul and isinstance(ul[0], str) and ul[0].startswith("http"):
+                return ul[0]
+            for v in obj.values():
+                found = self._find_first_url_list(v, depth + 1)
+                if found:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = self._find_first_url_list(item, depth + 1)
+                if found:
+                    return found
+        return None
 
     def _search_douyin_video(self, obj, depth=0):
         """递归搜索抖音RENDER_DATA中的视频信息"""
