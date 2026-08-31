@@ -695,12 +695,15 @@ class VideoAppUI(BoxLayout):
         self._set_progress_thread(3, "准备风控身份...")
         self._ensure_ttwid(session)
 
-        # 2) 伪造 s_v_web_id（服务器不校验，只查存在）
+        # 2) 伪造 s_v_web_id + msToken（服务器不校验，只查存在）
         try:
             import time as _t, random as _r
             fake = hex(int(_t.time() * 1000))[2:] + ''.join(
                 _r.choice('0123456789abcdef') for _ in range(14))
             session.cookies.set('s_v_web_id', fake, domain='.douyin.com')
+            # msToken：长随机串（社区验证：只是存在性检查）
+            mt = ''.join(_r.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-') for _ in range(107))
+            session.cookies.set('msToken', mt, domain='.douyin.com')
         except Exception:
             pass
 
@@ -717,33 +720,41 @@ class VideoAppUI(BoxLayout):
             raise Exception("无法解析抖音视频ID，请检查链接是否有效")
         video_id = m.group(1)
 
-        # 4) 请求 detail 接口（关键！）带重试（防临时限流）
+        # 4) 请求 detail 接口（关键！）多端点轮换 + 重试（防临时限流）
         self._set_progress_thread(10, "请求视频数据...")
         import time as _time
+        endpoints = [
+            "https://www.douyin.com/aweme/v1/web/aweme/detail/",
+            "https://m.douyin.com/aweme/v1/aweme/detail/",
+            "https://www.iesdouyin.com/aweme/v1/aweme/detail/",
+        ]
         api = None
-        for attempt in range(3):
-            try:
-                api = session.get(
-                    "https://www.douyin.com/aweme/v1/web/aweme/detail/",
-                    params={"aweme_id": video_id},
-                    headers={
-                        "Referer": "https://www.douyin.com/",
-                        "User-Agent": DESKTOP_UA,
-                        "Accept-Language": "zh-CN,zh;q=0.9",
-                    },
-                    timeout=20,
-                )
-                if api.status_code == 200 and (api.text or "").strip():
-                    break
-                api = None
-            except Exception:
-                api = None
-            if attempt < 2:
-                Clock.schedule_once(lambda dt, n=attempt + 2:
-                    self.log(f"[...] 接口繁忙，重试({n}/3)..."))
-                _time.sleep(2 + attempt * 2)
-        if api is None:
-            raise Exception("接口多次请求失败（可能被限流，稍后再试）")
+        for ep in endpoints:
+            for attempt in range(2):
+                try:
+                    api = session.get(
+                        ep,
+                        params={"aweme_id": video_id},
+                        headers={
+                            "Referer": "https://www.douyin.com/",
+                            "User-Agent": DESKTOP_UA,
+                            "Accept-Language": "zh-CN,zh;q=0.9",
+                        },
+                        timeout=20,
+                    )
+                    if api.status_code == 200 and (api.text or "").strip():
+                        break
+                    api = None
+                except Exception:
+                    api = None
+                if attempt == 0:
+                    Clock.schedule_once(lambda dt:
+                        self.log("[...] 接口繁忙，换端点/重试..."))
+                    _time.sleep(1.5 + attempt * 1.5)
+            if api is not None and (api.text or "").strip():
+                break
+        if api is None or not (api.text or "").strip():
+            raise Exception("接口多次请求失败（抖音风控冷却中，请等1分钟再试）")
         try:
             data = api.json()
         except Exception:
