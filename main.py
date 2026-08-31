@@ -1,6 +1,6 @@
 """
-川叶视频模块 — Android APK 版 (Kivy) v2.8.2-final
-小川叶原作 | Operit 姐姐移植
+川叶视频模块 — Android APK 版 (Kivy) v2.8.3-douyin
+ 小川叶原作 | Operit 姐姐移植（抖音解析修复版）
 """
 
 import os
@@ -644,8 +644,41 @@ class VideoAppUI(BoxLayout):
         self._stream_download(dl_url, outpath, total, title, extra_headers)
 
     # ========== 策略1.5：抖音专用解析（纯requests，不靠yt-dlp） ==========
+    def _ensure_ttwid(self, session: requests.Session):
+        """抖音风控：先拿ttwid cookie，否则页面会弹验证/拿不到数据"""
+        try:
+            if session.cookies.get("ttwid"):
+                return
+        except Exception:
+            pass
+        # 方案1：从抖音首页顺手拿（有时会给）
+        try:
+            session.get("https://www.douyin.com/", timeout=10,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+        except Exception:
+            pass
+        # 方案2：ttwid官方注册接口（最稳）
+        try:
+            r = session.post(
+                "https://ttwid.bytedance.com/ttwid/union/register/",
+                json={
+                    "region": "cn", "aid": 1768, "needFid": False,
+                    "service": "www.ixigua.com",
+                    "migrate_info": {"ticket": "", "source": "node"},
+                    "cbUrlProtocol": "https", "union": True,
+                },
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+            _ = r
+        except Exception:
+            pass
+
     def _try_download_douyin(self, url: str):
-        """模拟手机浏览器访问抖音页面，从RENDER_DATA JSON中提取无水印视频地址"""
+        """模拟浏览器访问抖音（分享页优先），提取无水印视频地址"""
         Clock.schedule_once(lambda dt: self._reset_progress())
         self._set_progress_thread(0, "解析抖音...")
 
@@ -653,9 +686,17 @@ class VideoAppUI(BoxLayout):
             "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
         )
+        DESKTOP_UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
 
         session = requests.Session()
         session.headers.update({"User-Agent": MOBILE_UA})
+
+        # 风控准备：ttwid
+        self._set_progress_thread(3, "风控准备(ttwid)...")
+        self._ensure_ttwid(session)
 
         # 1. 访问短链接 → 跟踪重定向获取真实URL + cookie
         self._set_progress_thread(5, "获取视频页面...")
@@ -669,48 +710,79 @@ class VideoAppUI(BoxLayout):
         if not m:
             m = re.search(r'modal_id=(\d+)', final_url)
         if not m:
-            # 可能短链接已经失效或格式变化，尝试从响应body找
             m = re.search(r'video/(\d+)', resp.text)
+        if not m:
+            m = re.search(r'/(\d{10,})', final_url)
         if not m:
             raise Exception("无法解析抖音视频ID，请检查链接是否有效")
         video_id = m.group(1)
         Clock.schedule_once(lambda dt, vid=video_id:
             self.log(f"[...] 视频ID: {vid}"))
 
-        # 3. 获取包含RENDER_DATA的页面（如果需要重新请求）
+        # 3. 优先请求「分享页」（https://www.iesdouyin.com/share/video/ID/）
+        #    比 www.douyin.com/video/ 风控更松；拿不到再回退主站
         self._set_progress_thread(10, "提取页面数据...")
-        if '/video/' not in final_url:
-            final_url = f"https://www.douyin.com/video/{video_id}"
-        page_resp = session.get(final_url, timeout=20, headers={
+        page_html = None
+        headers_base = {
             "Referer": "https://www.douyin.com/",
-            "User-Agent": MOBILE_UA,
-        })
+            "User-Agent": DESKTOP_UA,
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        # 3a. 分享页（桌面UA）—— 注意部分手机网络需 https
+        for share_url in (
+            f"https://www.iesdouyin.com/share/video/{video_id}/",
+            f"https://www.douyin.com/video/{video_id}",
+        ):
+            try:
+                r = session.get(share_url, timeout=20, headers=headers_base)
+                if r.status_code == 200 and r.text:
+                    page_html = r.text
+                    break
+            except Exception:
+                continue
+        if not page_html:
+            raise Exception("抖音页面访问失败（可能是风控拦截）")
 
-        # 4. 从HTML中提取RENDER_DATA
+        # 4. 从HTML中提取数据：RENDER_DATA → _ROUTER_DATA → 任意script JSON兜底
+        data = None
+        # 4a. RENDER_DATA（URL-encoded JSON）
         m = re.search(
             r'<script[^>]*id="RENDER_DATA"[^>]*>([^<]+)</script>',
-            page_resp.text
+            page_html
         )
-        if not m:
-            # 备用：尝试匹配 window._ROUTER_DATA
+        if m:
+            try:
+                data = json.loads(unquote(m.group(1)))
+            except Exception:
+                data = None
+        # 4b. window._ROUTER_DATA
+        if data is None:
             m2 = re.search(
                 r'window\._ROUTER_DATA\s*=\s*({.+?});?\s*</script>',
-                page_resp.text, re.DOTALL
+                page_html, re.DOTALL
             )
             if m2:
                 try:
                     data = json.loads(m2.group(1))
                 except Exception:
-                    raise Exception("解析_ROUTER_DATA JSON失败")
-            else:
-                raise Exception("未找到RENDER_DATA（页面结构可能已变化）")
-        else:
-            # RENDER_DATA是URL-encoded JSON
-            render_encoded = m.group(1)
-            try:
-                data = json.loads(unquote(render_encoded))
-            except Exception as e:
-                raise Exception(f"解析RENDER_DATA失败: {e}")
+                    data = None
+        # 4c. __pace_f 或 内嵌JSON兜底（新页面结构）
+        if data is None:
+            m3 = re.search(r'<script[^>]*id="__pace_f"[^>]*>([^<]+)</script>', page_html)
+            if m3:
+                try:
+                    data = json.loads(m3.group(1))
+                except Exception:
+                    data = None
+        if data is None:
+            m4 = re.search(r'window\.IDL_FLOW\s*=\s*({.+?});?', page_html, re.DOTALL)
+            if m4:
+                try:
+                    data = json.loads(m4.group(1))
+                except Exception:
+                    data = None
+        if data is None:
+            raise Exception("未找到页面数据（抖音结构又变了？）")
 
         # 5. 递归搜索视频URL
         self._set_progress_thread(15, "搜索视频地址...")
@@ -728,10 +800,8 @@ class VideoAppUI(BoxLayout):
         if not dl_url:
             raise Exception("未找到可下载的视频URL")
 
-        # 如果是列表（url_list），取第一个
         if isinstance(dl_url, list):
             dl_url = dl_url[0]
-        # 去水印：替换watermark=1为watermark=0，或移除wm后缀
         dl_url = dl_url.replace('watermark=1', 'watermark=0')
         dl_url = dl_url.replace('playwm', 'play')
 
@@ -742,6 +812,7 @@ class VideoAppUI(BoxLayout):
         self._stream_download(dl_url, outpath, 0, title, {
             "Referer": "https://www.douyin.com/",
             "User-Agent": MOBILE_UA,
+            "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
     def _search_douyin_video(self, obj, depth=0):
