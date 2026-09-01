@@ -694,6 +694,8 @@ class VideoAppUI(BoxLayout):
         # 1) 拿ttwid + __ac_nonce
         self._set_progress_thread(3, "准备风控身份...")
         self._ensure_ttwid(session)
+        Clock.schedule_once(lambda dt, c=dict(session.cookies):
+            self.log(f"[...] cookie: {list(c.keys())}"))
 
         # 2) 伪造 s_v_web_id + msToken（服务器不校验，只查存在）
         try:
@@ -711,6 +713,8 @@ class VideoAppUI(BoxLayout):
         self._set_progress_thread(5, "获取视频ID...")
         resp = session.get(url, allow_redirects=True, timeout=20)
         final_url = resp.url
+        Clock.schedule_once(lambda dt, s=resp.status_code, u=final_url[:70]:
+            self.log(f"[...] 短链: {s} -> {u}"))
         m = re.search(r'(?:/video/|modal_id=|/share/video/)(\d+)', final_url)
         if not m:
             m = re.search(r'/video/(\d+)', resp.text)
@@ -742,6 +746,8 @@ class VideoAppUI(BoxLayout):
                         },
                         timeout=20,
                     )
+                    Clock.schedule_once(lambda dt, ep=ep[:45], sc=api.status_code, ln=len(api.text or ""):
+                        self.log(f"[...] {ep} => {sc}/{ln}"))
                     if api.status_code == 200 and (api.text or "").strip():
                         break
                     api = None
@@ -785,6 +791,17 @@ class VideoAppUI(BoxLayout):
 
         dl_url = dl_url.replace('watermark=1', 'watermark=0')
         dl_url = dl_url.replace('playwm', 'play')
+
+        # ★ 将下载地址复制到剪贴板（用户可自行用浏览器/下载器下载——终极兜底！）
+        try:
+            from kivy.core.clipboard import Clipboard as _CB
+            _CB.copy(dl_url)
+            Clock.schedule_once(lambda dt, u=dl_url[:60]:
+                self.log(f"[✔] 下载地址已复制到剪贴板：{u}..."))
+            Clock.schedule_once(lambda dt:
+                self.log("[✔] （提示：若自动下载失败，粘贴到浏览器/保存即可下载）"))
+        except Exception:
+            pass
 
         title = ad.get("desc") or f"抖音_{video_id}"
         outpath = os.path.join(_DOWNLOAD_DIR, f"dy_{video_id}.mp4")
