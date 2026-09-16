@@ -1,12 +1,20 @@
 """
-川叶视频模块 — Android APK 版 (Kivy) v2.8.4-audio-fix
+川叶视频模块 — Android APK 版 (Kivy) v2.8.5-bundled-ffmpeg
  小川叶原作 | Operit 姐姐移植 | 小鲸修 bug
 
+ v2.8.5 修复（重要）：
+   B站"卡在开始下载、没反应" —— 根因是【手机上没有 ffmpeg】。
+   实测确认 B站视频没有任何「音视频已合流」的格式（全是 DASH 分离轨），
+   所以没有 ffmpeg 就【无法】下到有声的B站视频，这不是能绕过去的。
+   本次改动：
+     1. 支持从 APK 内置释放 ffmpeg（assets/ffmpeg → 应用私有目录）
+     2. ffmpeg 查找更全面：环境变量 → APK内置 → PATH → 常见目录
+     3. 缺失时写明确日志（原来只弹窗，日志区一片空白，看起来像卡死）
+     4. 修复"释放的文件名与查找的文件名不一致"的健壮性问题
+
  v2.8.4 修复：
-   1. B站视频没声音 —— 改用 yt-dlp 内置下载器选轨 + ffmpeg 合并音视频
-      (B站是 DASH 流：画面和声音是两条独立轨道，旧逻辑只下了纯视频轨)
-   2. 抖音下载不了 —— 抖音已上 Argus 风控(需 a_bogus 签名)，纯请求方案失效，
-      改为：先试 yt-dlp，失败则一键用浏览器打开原链接下载
+   1. B站视频没声音 —— 改用 yt-dlp 内置下载器选轨 + ffmpeg 合并
+   2. 抖音下载不了 —— 抖音已上 Argus 风控，改为浏览器打开原链接下载
 """
 
 import os
@@ -90,57 +98,246 @@ if _DOWNLOAD_DIR is None:
     _DOWNLOAD_DIR = os.getcwd()
 
 
+# ========== 应用私有目录（用于放置内置 ffmpeg） ==========
+# Android 上 /data/data/<包名>/ 是 App 自己的地盘，一定能读写、也能给可执行权限。
+_APP_DIR = None
+if os.environ.get("ANDROID_ARGUMENT") or os.environ.get("ANDROID_PRIVATE"):
+    _APP_DIR = os.path.dirname(os.environ.get("ANDROID_PRIVATE", "") or
+                              os.environ.get("ANDROID_ARGUMENT", ""))
+
+# 记录 ffmpeg 查找过程中试过的路径，找不到时用来给用户明确诊断
+_FFMPEG_SEARCHED = []
+
+
+def _extract_ffmpeg_tarball(tar_path, dst_dir):
+    """把内置的 ffmpeg tar.gz 解压到 dst_dir（Android 上没有 tar 命令，用纯 Python）。"""
+    import tarfile
+    with tarfile.open(tar_path, "r:gz") as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            # 只取文件名，防目录穿越
+            name = os.path.basename(m.name)
+            if not name or name.startswith("."):
+                continue
+            dst = os.path.join(dst_dir, name)
+            src = tf.extractfile(m)
+            if src is None:
+                continue
+            with src, open(dst, "wb") as fo:
+                shutil.copyfileobj(src, fo, 1024 * 1024)
+
+
+def _prepare_bundled_ffmpeg():
+    """把 APK 里内置的 ffmpeg 释放到应用私有目录，返回其所在目录。
+
+    重点解决：B站是 DASH 流，音视频分为两条轨道，【必须有 ffmpeg 合并】，
+    否则下载的视频没有声音。而手机系统通常不带 ffmpeg。
+
+    内置形式（二选一）：
+      A) assets/ffmpeg-bundle.tar.gz  —— Termux 版 ffmpeg + 全部依赖库（推荐）
+      B) assets/ffmpeg               —— 单个静态编译的 ffmpeg 二进制
+
+    会同时设置 LD_LIBRARY_PATH，让动态链接版的 ffmpeg 能找到同目录的 .so。
+    """
+    if not _APP_DIR:
+        return None                       # 非 Android 环境，无需释放
+    exe_name = "ffmpeg"
+    dst_dir = os.path.join(_APP_DIR, "bin")
+    dst = os.path.join(dst_dir, exe_name)
+    try:
+        here = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else ""
+        # p4a 不同版本把 assets 放的位置不一样，多试几个
+        roots = [_APP_DIR, os.path.join(_APP_DIR, "app"), os.getcwd()]
+        if here:
+            roots += [here, os.path.join(here, "..")]
+        def find_in_assets(filename):
+            for r in roots:
+                for sub in ("assets", ""):
+                    p = os.path.join(r, sub, filename) if sub else os.path.join(r, filename)
+                    try:
+                        if os.path.isfile(p) and os.path.getsize(p) > 4096:
+                            return p
+                    except Exception:
+                        continue
+            return None
+
+        os.makedirs(dst_dir, exist_ok=True)
+
+        # 已经释放过就不重复做（避免每次都拷贝 23MB）
+        already = os.path.isfile(dst) and os.path.getsize(dst) > 1024
+        if not already:
+            # --- A) 优先用打包好的 tar.gz（含依赖库） ---
+            tarball = find_in_assets("ffmpeg-bundle.tar.gz")
+            if tarball:
+                _extract_ffmpeg_tarball(tarball, dst_dir)
+            else:
+                # --- B) 退回到单个可执行文件 ---
+                single = find_in_assets(exe_name)
+                if not single:
+                    return None
+                with open(single, "rb") as fi, open(dst, "wb") as fo:
+                    shutil.copyfileobj(fi, fo, 1024 * 1024)
+
+        # 确保可执行
+        try:
+            os.chmod(dst, 0o755)
+        except Exception:
+            pass
+        if not os.path.isfile(dst) or os.path.getsize(dst) < 1024:
+            return None
+
+        # 动态链接版需要能找到同目录的 .so：
+        #   1) 设 LD_LIBRARY_PATH（子进程会继承，yt-dlp 调用 ffmpeg 时生效）
+        #   2) 再补一份带 SONAME 的「无版本后缀」软链（部分加载器按短名找）
+        try:
+            cur = os.environ.get("LD_LIBRARY_PATH", "")
+            if dst_dir not in cur.split(os.pathsep):
+                os.environ["LD_LIBRARY_PATH"] = (
+                    dst_dir + (os.pathsep + cur if cur else ""))
+        except Exception:
+            pass
+        # 注意：Android/Windows 都可能禁止建符号链接，
+        # 所以依次尝试 软链 -> 硬链 -> 复制，保证一定能成。
+        #
+        # ⚠️ 必须建【两个】别名：
+        #     libavcodec.so.62.28.102 是实体文件，
+        #     但 ffmpeg 的 ELF 里记的需求名是 SONAME = libavcodec.so.62
+        #     （少了这个就加载失败！）。libavcodec.so 是给 -l 链接用的。
+        try:
+            for fn in os.listdir(dst_dir):
+                if ".so." not in fn or ".so." not in fn:
+                    continue
+                head, _, tail = fn.partition(".so.")
+                if not tail:
+                    continue
+                major = tail.split(".")[0]
+                for short in (f"{head}.so", f"{head}.so.{major}"):
+                    sp = os.path.join(dst_dir, short)
+                    if os.path.exists(sp):
+                        continue
+                    src = os.path.join(dst_dir, fn)
+                    try:
+                        os.symlink(fn, sp)                        # 首选：软链（最省空间）
+                    except Exception:
+                        try:
+                            os.link(src, sp)                      # 次选：硬链
+                        except Exception:
+                            try:
+                                shutil.copy2(src, sp)             # 兜底：复制
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        return dst_dir
+    except Exception:
+        return None
+
+
 # ========== ffmpeg 检测（B站音视频合并必需） ==========
 # B站是 DASH 流：画面(m4s/mp4) 与 声音(m4a) 分成两条轨道，
 # 必须用 ffmpeg 合并，否则下出来的文件「没有声音」。
+# 实测结论（2026-09）：B站视频【不存在】音视频已合流的格式，
+# 所以没有 ffmpeg 就真的下不到有声视频 —— 不是代码能绕过去的。
 def _find_ffmpeg_dir():
     """返回含 ffmpeg 可执行文件的目录；找不到返回 None。
 
-    Android 用户可安装 ffmpeg（Termux: pkg install ffmpeg），
-    或使用带 ffmpeg 的打包方案。
-    """
-    exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    查找顺序（重要）：
+      1. 环境变量 FFMPEG_DIR / FFMPEG_BINARY
+      2. 从 APK 内置释放的 ffmpeg（_prepare_bundled_ffmpeg）—— 最可靠
+      3. 系统 PATH
+      4. 已知的 Android / Linux 目录（Termux、系统目录等）
 
-    # 1) 允许用环境变量指定
+    为什么这么麻烦：实测确认 B站视频【没有音视频已合流的格式】，
+    必须用 ffmpeg 把视频轨和音频轨合并，否则下出来的是「无声视频」。
+    """
+    exe_name = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+    tried = []
+
+    def looks_executable(p):
+        """检查 p 是否像一个可用的 ffmpeg 可执行文件（跨平台）。"""
+        try:
+            if not p or not os.path.isfile(p):
+                return False
+            if os.path.getsize(p) < 4096:
+                return False
+            if os.name != "nt":
+                if not os.access(p, os.X_OK):
+                    return False
+        except Exception:
+            return False
+        return True
+
+    def has_ffmpeg(d):
+        """目录 d 里有没有 ffmpeg（两种文件名都认，避免平台判断出错）。"""
+        if not d:
+            return None
+        for name in (exe_name, "ffmpeg", "ffmpeg.exe"):
+            p = os.path.join(d, name)
+            if looks_executable(p):
+                return d
+        return None
+
+    def remember(d):
+        try:
+            if d and d not in tried:
+                tried.append(d)
+        except Exception:
+            pass
+
+    _FFMPEG_SEARCHED[:] = []
+    for _p in (os.environ.get("FFMPEG_DIR"), os.environ.get("FFMPEG_BINARY")):
+        remember(_p)
+    _FFMPEG_SEARCHED[:] = list(tried)
+
+    # 1) 环境变量显式指定
     for env_name in ("FFMPEG_DIR", "FFMPEG_BINARY"):
         val = os.environ.get(env_name)
-        if val:
-            if os.path.isdir(val):
+        if not val:
+            continue
+        if os.path.isdir(val):
+            if has_ffmpeg(val):
                 return val
-            if os.path.isfile(val):
-                return os.path.dirname(val)
+        elif looks_executable(val):
+            return os.path.dirname(val)
 
-    # 2) PATH 里找（shutil.which 在 Windows 上会自动补 .exe）
+    # 2) 从 APK 内置释放出来的 ffmpeg（离线可用，最推荐）
+    bundled = _prepare_bundled_ffmpeg()
+    if bundled:
+        remember(bundled)
+        if has_ffmpeg(bundled):
+            return bundled
+
+    # 3) 系统 PATH
     w = shutil.which("ffmpeg")
-    if w:
+    remember(os.path.dirname(w) if w else None)
+    if w and looks_executable(w):
         return os.path.dirname(w)
 
-    # 3) 常见 Android / Linux 位置
-    candidates = [
-        "/data/data/org.termux/files/usr/bin",
+    # 4) 已知 Android / Linux 目录（含应用私有目录）
+    candidates = []
+    if _APP_DIR:
+        candidates.append(os.path.join(_APP_DIR, "bin"))
+    candidates += [
+        "/data/data/org.termux/files/usr/bin",   # Termux（需用户自行安装）
         "/data/data/com.termux/files/usr/bin",
+        "/data/local/tmp",
         "/system/bin",
         "/system/xbin",
         "/usr/bin",
         "/usr/local/bin",
-        "/data/local/tmp",
         os.path.join(os.getcwd(), "bin"),
     ]
-    # 4) PyPI 的 imageio-ffmpeg 自带一个 ffmpeg 二进制（如果装了就能直接用）
-    try:
-        import imageio_ffmpeg  # type: ignore
-        exe_path = imageio_ffmpeg.get_ffmpeg_exe()
-        if exe_path and os.path.isfile(exe_path):
-            return os.path.dirname(exe_path)
-    except Exception:
-        pass
-
     for d in candidates:
+        remember(d)
         try:
-            if d and os.path.isfile(os.path.join(d, exe)):
+            if has_ffmpeg(d):
                 return d
         except Exception:
             continue
+
+    _FFMPEG_SEARCHED[:] = list(tried)
     return None
 
 
@@ -509,21 +706,22 @@ class VideoAppUI(BoxLayout):
 
     # ---- 关于弹窗 ----
     def _show_about(self):
-        msg = ("川叶视频模块 v2.8.4-audio-fix\n\n"
+        msg = ("川叶视频模块 v2.8.5-bundled-ffmpeg\n\n"
                "作者：小川叶\n"
                "移植：笨蛋姐姐 (Operit)\n"
                "修 bug：小鲸\n"
                "QQ：2075287124\n\n"
                "支持：B站 抖音 快手 小红书\n"
                "       + 通用网页视频抓取\n\n"
-               "v2.8.4 修复：\n"
+               "v2.8.4~2.8.5 修复：\n"
                "  ✔ B站下载没声音（DASH音视频分离，\n"
                "    现用 yt-dlp 选轨 + ffmpeg 合并）\n"
+               "  ✔ 支持 APK 内置 ffmpeg（打包时放入\n"
+               "    assets/ffmpeg，首次运行自动释放）\n"
                "  ⚠ 抖音已上 Argus 风控，自动解析失效，\n"
-               "    改为一键用浏览器打开下载\n\n"
-               "⚠ 已知问题：'打开文件'功能\n"
-               "   因Android文件权限限制暂不可用\n"
-               "   请移步相册/文件管理器查找下载文件")
+               "    改为一键用浏览器打开下载\n"
+               "  ℹ B站必须有 ffmpeg 才能合成有声视频，\n"
+               "    抖音/快手/小红书不受影响")
         self._show_popup("关于", msg, show_open=False)
 
     # ---- 进度条更新 ----
@@ -680,10 +878,27 @@ class VideoAppUI(BoxLayout):
         return platform in ("bilibili", "youtube")
 
     def _ensure_ffmpeg(self, platform):
-        """返回 ffmpeg 所在目录；缺失且平台需要时抛 _MissingFFmpeg。"""
+        """返回 ffmpeg 所在目录；本平台缺 ffmpeg 时抛 _MissingFFmpeg。
+
+        ⚠️ 实测结论：B站视频【没有音视频已合流的格式】（全是 DASH 分离轨），
+        所以缺 ffmpeg 时无法产出有声视频 —— 只能明确提示，不能硬下个无声的。
+        """
         if _FFMPEG_DIR:
             return _FFMPEG_DIR
         if self._need_ffmpeg(platform):
+            # 写入日志，便于前因后果一目了然（以前只弹窗，日志区一片空白）
+            Clock.schedule_once(lambda dt: self.log(
+                "[X] 本机没有 ffmpeg，B站/YouTube 无法合并音视频"))
+            try:
+                if _APP_DIR and not _prepare_bundled_ffmpeg():
+                    Clock.schedule_once(lambda dt, d=_APP_DIR: self.log(
+                        f"[i] APK 内置 ffmpeg 未找到（已查 {d}/assets/ffmpeg）"))
+                dirs = _FFMPEG_SEARCHED[:6]
+                if dirs:
+                    Clock.schedule_once(lambda dt, d=dirs:
+                        self.log("[i] 已查找: " + " | ".join(str(x) for x in d)))
+            except Exception:
+                pass
             raise _MissingFFmpeg()
         return None
 
@@ -772,19 +987,23 @@ class VideoAppUI(BoxLayout):
         try:
             content = BoxLayout(orientation="vertical", padding=10, spacing=8)
             content.add_widget(Label(
-                text=("B站的画面和声音是分开的两条轨道，\n"
-                      "必须用 ffmpeg 合并，否则下载的视频没有声音。\n\n"
-                      "当前设备没有检测到 ffmpeg。\n\n"
-                      "安卓可这样装：\n"
-                      "  1) 安装 Termux\n"
-                      "  2) 执行  pkg install ffmpeg\n\n"
-                      "或者把已有的 ffmpeg 放到 PATH 里，\n"
-                      "并设置环境变量 FFMPEG_DIR 指向它所在目录。"),
+                text=("B站的画面和声音是分开的两条轨道（DASH），\n"
+                      "必须用 ffmpeg 合并，否则视频没有声音。\n\n"
+                      "⚠️ 实测确认：B站没有「已合流」的格式，\n"
+                      "   所以缺 ffmpeg 时无法下到有声的B站视频。\n\n"
+                      "本机没有检测到 ffmpeg。\n\n"
+                      "【推荐】打包时把 ffmpeg 内置进 APK：\n"
+                      "  把 Android arm64 版 ffmpeg 二进制放到工程的\n"
+                      "  assets/ffmpeg，App 首次运行会自动释放并使用。\n\n"
+                      "【次选】安装 Termux 后执行：\n"
+                      "  pkg install ffmpeg\n\n"
+                      "抖音、快手、小红书不受影响，无需 ffmpeg。"),
                 font_name=FONT_NAME,
             ))
             close_btn = Button(text="知道了", font_name=FONT_NAME,
                                size_hint=(1, 0.3))
-            popup = Popup(title="缺少 ffmpeg", content=content, size_hint=(0.88, 0.62))
+            popup = Popup(title="B站需要 ffmpeg", content=content,
+                          size_hint=(0.92, 0.72))
             close_btn.bind(on_press=popup.dismiss)
             content.add_widget(close_btn)
             popup.open()
