@@ -1,12 +1,20 @@
 """
-川叶视频模块 — Android APK 版 (Kivy) v2.8.3-douyin
- 小川叶原作 | Operit 姐姐移植（抖音解析修复版）
+川叶视频模块 — Android APK 版 (Kivy) v2.8.4-audio-fix
+ 小川叶原作 | Operit 姐姐移植 | 小鲸修 bug
+
+ v2.8.4 修复：
+   1. B站视频没声音 —— 改用 yt-dlp 内置下载器选轨 + ffmpeg 合并音视频
+      (B站是 DASH 流：画面和声音是两条独立轨道，旧逻辑只下了纯视频轨)
+   2. 抖音下载不了 —— 抖音已上 Argus 风控(需 a_bogus 签名)，纯请求方案失效，
+      改为：先试 yt-dlp，失败则一键用浏览器打开原链接下载
 """
 
 import os
 import re
 import json
 import glob
+import shutil
+import platform
 import subprocess
 import threading
 import requests
@@ -54,18 +62,89 @@ except Exception:
     pass
 
 # ========== 下载目录 ==========
-_DOWNLOAD_DIRS = [
-    '/storage/emulated/0/Download',
-    '/sdcard/Download',
-    '/data/data/com.chuanye.chuanye_video/files',  # 应用内部，一定可写
-]
+# 注意：原版只列了 Android 路径，在桌面端会全部落空。这里按平台给候选。
+if platform.system() == "Windows":
+    _DOWNLOAD_DIRS = [
+        os.path.join(os.path.expanduser("~"), "Downloads"),
+        os.getcwd(),
+    ]
+elif platform.system() == "Darwin":
+    _DOWNLOAD_DIRS = [os.path.join(os.path.expanduser("~"), "Downloads")]
+else:
+    _DOWNLOAD_DIRS = [
+        '/storage/emulated/0/Download',
+        '/sdcard/Download',
+        '/data/data/com.chuanye.chuanye_video/files',  # 应用内部，一定可写
+        os.path.join(os.path.expanduser("~"), "Downloads"),
+    ]
+
 _DOWNLOAD_DIR = None
 for _dd in _DOWNLOAD_DIRS:
-    if os.path.isdir(_dd) and os.access(_dd, os.W_OK):
-        _DOWNLOAD_DIR = _dd
-        break
+    try:
+        if os.path.isdir(_dd) and os.access(_dd, os.W_OK):
+            _DOWNLOAD_DIR = _dd
+            break
+    except Exception:
+        continue
 if _DOWNLOAD_DIR is None:
-    _DOWNLOAD_DIR = '/sdcard/Download'
+    _DOWNLOAD_DIR = os.getcwd()
+
+
+# ========== ffmpeg 检测（B站音视频合并必需） ==========
+# B站是 DASH 流：画面(m4s/mp4) 与 声音(m4a) 分成两条轨道，
+# 必须用 ffmpeg 合并，否则下出来的文件「没有声音」。
+def _find_ffmpeg_dir():
+    """返回含 ffmpeg 可执行文件的目录；找不到返回 None。
+
+    Android 用户可安装 ffmpeg（Termux: pkg install ffmpeg），
+    或使用带 ffmpeg 的打包方案。
+    """
+    exe = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+
+    # 1) 允许用环境变量指定
+    for env_name in ("FFMPEG_DIR", "FFMPEG_BINARY"):
+        val = os.environ.get(env_name)
+        if val:
+            if os.path.isdir(val):
+                return val
+            if os.path.isfile(val):
+                return os.path.dirname(val)
+
+    # 2) PATH 里找（shutil.which 在 Windows 上会自动补 .exe）
+    w = shutil.which("ffmpeg")
+    if w:
+        return os.path.dirname(w)
+
+    # 3) 常见 Android / Linux 位置
+    candidates = [
+        "/data/data/org.termux/files/usr/bin",
+        "/data/data/com.termux/files/usr/bin",
+        "/system/bin",
+        "/system/xbin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/data/local/tmp",
+        os.path.join(os.getcwd(), "bin"),
+    ]
+    # 4) PyPI 的 imageio-ffmpeg 自带一个 ffmpeg 二进制（如果装了就能直接用）
+    try:
+        import imageio_ffmpeg  # type: ignore
+        exe_path = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe_path and os.path.isfile(exe_path):
+            return os.path.dirname(exe_path)
+    except Exception:
+        pass
+
+    for d in candidates:
+        try:
+            if d and os.path.isfile(os.path.join(d, exe)):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+_FFMPEG_DIR = _find_ffmpeg_dir()
 
 
 # ========== 工具函数 ==========
@@ -153,6 +232,11 @@ def get_generic_info(url: str) -> str:
     lines.append(f".mp4={t.count('.mp4')} | .m3u8={t.count('.m3u8')}")
     lines.append("====== 分析完成 ======")
     return "\n".join(lines)
+
+
+class _MissingFFmpeg(Exception):
+    """B站等 DASH 站点需要 ffmpeg 合并音视频，但本机没有。"""
+    pass
 
 
 # ========== Kivy UI ==========
@@ -425,12 +509,18 @@ class VideoAppUI(BoxLayout):
 
     # ---- 关于弹窗 ----
     def _show_about(self):
-        msg = ("川叶视频模块 v2.8.2-final\n\n"
+        msg = ("川叶视频模块 v2.8.4-audio-fix\n\n"
                "作者：小川叶\n"
                "移植：笨蛋姐姐 (Operit)\n"
+               "修 bug：小鲸\n"
                "QQ：2075287124\n\n"
                "支持：B站 抖音 快手 小红书\n"
                "       + 通用网页视频抓取\n\n"
+               "v2.8.4 修复：\n"
+               "  ✔ B站下载没声音（DASH音视频分离，\n"
+               "    现用 yt-dlp 选轨 + ffmpeg 合并）\n"
+               "  ⚠ 抖音已上 Argus 风控，自动解析失效，\n"
+               "    改为一键用浏览器打开下载\n\n"
                "⚠ 已知问题：'打开文件'功能\n"
                "   因Android文件权限限制暂不可用\n"
                "   请移步相册/文件管理器查找下载文件")
@@ -545,345 +635,255 @@ class VideoAppUI(BoxLayout):
         threading.Thread(target=self._do_download, args=(url,), daemon=True).start()
 
     def _do_download(self, url: str):
-        """策略1: yt-dlp提取 + 策略2: 通用网页抓取 + 抖音专用解析"""
-        # 抖音走专用解析通道（yt-dlp在Android上对抖音完全不兼容）
+        """下载主流程。
+
+        v2.8.4 变更：改为「让 yt-dlp 自己选轨并下载」。
+        原因：B站是 DASH 流（画面/声音分离），手工挑单一 URL 必然丢音轨；
+        yt-dlp 的 bestvideo+bestaudio 会分别取两条轨道再用 ffmpeg 合并。
+        """
         platform = detect_platform(url)
+
         if platform == "douyin":
-            try:
-                self._try_download_douyin(url)
-                return
-            except Exception as e:
-                Clock.schedule_once(lambda dt, e=e:
-                    self.log(f"[X] 抖音专用解析失败：{e}"))
-                return
+            self._download_douyin(url)
+            return
 
         try:
             self._try_download_ytdlp(url)
             return
+        except _MissingFFmpeg:
+            Clock.schedule_once(lambda dt: self._set_progress(0, ""))
+            self._show_missing_ffmpeg()
+            return
         except Exception as e:
             Clock.schedule_once(lambda dt, e=e:
-                self.log(f"[!] yt-dlp失败({e})，尝试通用抓取..."))
+                self.log(f"[!] yt-dlp 失败：{str(e)[:120]}"))
+            Clock.schedule_once(lambda dt:
+                self.log("[...] 尝试通用网页抓取..."))
 
         try:
             self._try_download_generic(url)
         except Exception as e:
             Clock.schedule_once(lambda dt, e=e:
-                self.log(f"[X] 也失败：{e}"))
+                self.log(f"[X] 通用抓取也失败：{str(e)[:120]}"))
 
-    # ========== 策略1：yt-dlp 提取 + requests 下载 ==========
+    # ========== B站/YouTube 等：交给 yt-dlp 自己选轨下载 ==========
+    @staticmethod
+    def _format_selector(platform):
+        """B站等 DASH 站点：必须 bestvideo+bestaudio 再合并，否则没声音。"""
+        if platform in ("bilibili", "youtube"):
+            return "bestvideo+bestaudio/best"
+        return "best/bestvideo+bestaudio"
+
+    @staticmethod
+    def _need_ffmpeg(platform):
+        """这些平台音视频分离，必须有 ffmpeg 才能合并。"""
+        return platform in ("bilibili", "youtube")
+
+    def _ensure_ffmpeg(self, platform):
+        """返回 ffmpeg 所在目录；缺失且平台需要时抛 _MissingFFmpeg。"""
+        if _FFMPEG_DIR:
+            return _FFMPEG_DIR
+        if self._need_ffmpeg(platform):
+            raise _MissingFFmpeg()
+        return None
+
     def _try_download_ytdlp(self, url: str):
+        """用 yt-dlp 内置下载器下载（自动选轨 + ffmpeg 合并）。
+
+        这是 v2.8.4 的核心修复：原实现用手工挑一个 format 的 url 再 requests 流式下载，
+        对 B站 DASH 流只会拿到「纯视频轨」，所以下载出来的视频没有声音。
+        """
         Clock.schedule_once(lambda dt: self._reset_progress())
         self._set_progress_thread(0, "解析中...")
 
         platform = detect_platform(url)
         pname = PLATFORM_MAP.get(platform, {}).get("name", "未知平台")
+        ffmpeg_dir = self._ensure_ffmpeg(platform)
 
-        ydl_opts = {
+        if ffmpeg_dir:
+            Clock.schedule_once(lambda dt, d=ffmpeg_dir:
+                self.log(f"[i] ffmpeg: {d}"))
+        else:
+            Clock.schedule_once(lambda dt:
+                self.log("[i] 未检测到 ffmpeg（本平台音视频未分离，可直接下载)"))
+
+        # ---- 进度回调：yt-dlp 下载在子线程，必须用 Clock 切回主线程 ----
+        def _hook(d):
+            try:
+                st = d.get('status')
+                if st == 'downloading':
+                    total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                    done = d.get('downloaded_bytes', 0) or 0
+                    pct = int(done / total * 100) if total else 0
+                    if pct < 0:
+                        pct = 0
+                    if pct > 99:
+                        pct = 99
+                    text = d.get('_percent_str', '').strip() or f"{pct}%"
+                    sp = (d.get('_speed_str') or '').strip()
+                    eta = (d.get('_eta_str') or '').strip()
+                    if sp:
+                        text += f"  {sp}"
+                    if eta:
+                        text += f"  ETA {eta}"
+                    Clock.schedule_once(
+                        lambda dt, v=pct, t=text: self._set_progress(v, t))
+                elif st == 'finished':
+                    Clock.schedule_once(
+                        lambda dt: self._set_progress(100, "合并音视频中..."))
+            except Exception:
+                pass
+
+        opts = {
+            "format": self._format_selector(platform),
+            "outtmpl": os.path.join(_DOWNLOAD_DIR, "%(title).80B-%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "progress_hooks": [_hook],
             "quiet": True,
             "no_warnings": True,
-            "simulate": True,       # 模拟模式，避免某些提取器尝试写文件
-            "skip_download": True,
+            "noprogress": True,
         }
+        if ffmpeg_dir:
+            opts["ffmpeg_location"] = ffmpeg_dir
+
+        def _run():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            _run()
         except Exception as e:
-            err = str(e)
-            if 'write' in err.lower():
-                raise Exception(f"{pname}提取器在Android上不兼容({err[:80]})")
+            msg = str(e).lower()
+            # yt-dlp 版本过旧时，常见报错提到 extractor / 需要更新
+            if any(k in msg for k in ("unable to extract", "unsupported url",
+                                      "no video formats", "failed to extract")):
+                Clock.schedule_once(lambda dt:
+                    self.log("[i] 若反复失败，可能是 yt-dlp 版本过旧，建议更新"))
             raise
 
-        title = info.get('title', '视频')
-        vid = info.get('id', 'video')
-        formats = info.get('formats', [])
-        if not formats:
-            raise Exception("未找到可用格式")
+        Clock.schedule_once(lambda dt: self._set_progress(100, ""))
+        Clock.schedule_once(lambda dt, p=_DOWNLOAD_DIR:
+            self.log(f"[OK] 下载完成 ✅ 已保存到：{p}"))
+        Clock.schedule_once(lambda dt, t=pname, p=_DOWNLOAD_DIR:
+            self._show_popup("下载完成", f"{t} 下载完成\n已保存到：\n{p}\n\n请移步相册或文件管理器查找"))
 
-        # 选最佳格式
-        best = None
-        # 1) mp4有音+有画
-        for f in formats:
-            if (f.get('ext') == 'mp4' and f.get('url') and
-                f.get('acodec', 'none') != 'none' and
-                f.get('vcodec', 'none') != 'none'):
-                if best is None or (f.get('filesize') or f.get('filesize_approx') or 0) > (best.get('filesize') or best.get('filesize_approx') or 0):
-                    best = f
-        # 2) mp4有画面（无音也可）
-        if best is None:
-            for f in formats:
-                if (f.get('ext') == 'mp4' and f.get('url') and
-                    f.get('vcodec', 'none') != 'none'):
-                    if best is None or (f.get('height') or 0) > (best.get('height') or 0):
-                        best = f
-        # 3) 任意有画面的格式
-        if best is None:
-            for f in formats:
-                if f.get('vcodec', 'none') != 'none' and f.get('url'):
-                    if best is None or (f.get('height') or 0) > (best.get('height') or 0):
-                        best = f
-        # 4) 兜底
-        if best is None:
-            for f in formats:
-                if f.get('url'):
-                    best = f
-                    break
-        if best is None:
-            raise Exception("无法获取下载地址")
-
-        dl_url = best['url']
-        ext = best.get('ext', 'mp4')
-        total = best.get('filesize') or best.get('filesize_approx') or 0
-        h = best.get('height', '?')
-        outpath = os.path.join(_DOWNLOAD_DIR, f"{vid}.{ext}")
-
-        Clock.schedule_once(lambda dt, t=title, hh=h, s=total:
-            self.log(f"[...] {t} ({hh}p, {s/1024/1024:.1f}MB)"))
-
-        # 继承 yt-dlp 提取的 http_headers（含 Referer/Cookie，B站必需！）
-        extra_headers = best.get('http_headers', {})
-        self._stream_download(dl_url, outpath, total, title, extra_headers)
-
-    # ========== 策略1.5：抖音专用解析（纯requests，不靠yt-dlp） ==========
-    def _ensure_ttwid(self, session: requests.Session):
-        """抖音风控：先拿ttwid cookie，否则页面会弹验证/拿不到数据"""
+    def _show_missing_ffmpeg(self):
+        """B站音视频合并需要 ffmpeg，缺少时给出可操作的指引。"""
         try:
-            if session.cookies.get("ttwid"):
-                return
-        except Exception:
-            pass
-        # 方案1：从抖音首页顺手拿（有时会给）
-        try:
-            session.get("https://www.douyin.com/", timeout=10,
-                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
-        except Exception:
-            pass
-        # 方案2：ttwid官方注册接口（最稳）
-        try:
-            r = session.post(
-                "https://ttwid.bytedance.com/ttwid/union/register/",
-                json={
-                    "region": "cn", "aid": 1768, "needFid": False,
-                    "service": "www.ixigua.com",
-                    "migrate_info": {"ticket": "", "source": "node"},
-                    "cbUrlProtocol": "https", "union": True,
-                },
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Content-Type": "application/json",
-                },
-                timeout=10,
-            )
-            _ = r
+            content = BoxLayout(orientation="vertical", padding=10, spacing=8)
+            content.add_widget(Label(
+                text=("B站的画面和声音是分开的两条轨道，\n"
+                      "必须用 ffmpeg 合并，否则下载的视频没有声音。\n\n"
+                      "当前设备没有检测到 ffmpeg。\n\n"
+                      "安卓可这样装：\n"
+                      "  1) 安装 Termux\n"
+                      "  2) 执行  pkg install ffmpeg\n\n"
+                      "或者把已有的 ffmpeg 放到 PATH 里，\n"
+                      "并设置环境变量 FFMPEG_DIR 指向它所在目录。"),
+                font_name=FONT_NAME,
+            ))
+            close_btn = Button(text="知道了", font_name=FONT_NAME,
+                               size_hint=(1, 0.3))
+            popup = Popup(title="缺少 ffmpeg", content=content, size_hint=(0.88, 0.62))
+            close_btn.bind(on_press=popup.dismiss)
+            content.add_widget(close_btn)
+            popup.open()
         except Exception:
             pass
 
-    def _try_download_douyin(self, url: str):
-        """抖音API方案（2026新版）：
-        拿ttwid+s_v_web_id → 请求 aweme/detail 接口 → 提取无水印地址"""
-        Clock.schedule_once(lambda dt: self._reset_progress())
-        self._set_progress_thread(0, "解析抖音...")
+    # ========== 抖音：yt-dlp 尝试 + 浏览器兜底 ==========
+    def _download_douyin(self, url: str):
+        """抖音专用流程。
 
-        DESKTOP_UA = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-
-        session = requests.Session()
-        session.headers.update({"User-Agent": DESKTOP_UA})
-
-        # 1) 拿ttwid + __ac_nonce
-        self._set_progress_thread(3, "准备风控身份...")
-        self._ensure_ttwid(session)
-        Clock.schedule_once(lambda dt, c=dict(session.cookies):
-            self.log(f"[...] cookie: {list(c.keys())}"))
-
-        # 2) 伪造 s_v_web_id + msToken（服务器不校验，只查存在）
+        背景（实测结论）：抖音已启用 Argus 风控，网页接口返回
+            403 Blocked by ArgusSecurityPlugin Uifid Not Found
+        且分享页已变成纯 JS 空壳，服务端 HTML 里不再包含 play_addr。
+        因此「纯 requests 解析」这条路已经走不通，必须依赖：
+          (a) yt-dlp + 真实浏览器 cookie（有就能下），或
+          (b) 直接用浏览器打开原链接（用户自己在浏览器里下载）
+        """
+        self._set_progress_thread(0, "抖音：尝试 yt-dlp...")
         try:
-            import time as _t, random as _r
-            fake = hex(int(_t.time() * 1000))[2:] + ''.join(
-                _r.choice('0123456789abcdef') for _ in range(14))
-            session.cookies.set('s_v_web_id', fake, domain='.douyin.com')
-            # msToken：长随机串（社区验证：只是存在性检查）
-            mt = ''.join(_r.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-') for _ in range(107))
-            session.cookies.set('msToken', mt, domain='.douyin.com')
-        except Exception:
-            pass
-
-        # 3) 提取视频ID（支持 v.douyin.com 短链 / share页 / video页）
-        self._set_progress_thread(5, "获取视频ID...")
-        resp = session.get(url, allow_redirects=True, timeout=20)
-        final_url = resp.url
-        Clock.schedule_once(lambda dt, s=resp.status_code, u=final_url[:70]:
-            self.log(f"[...] 短链: {s} -> {u}"))
-        m = re.search(r'(?:/video/|modal_id=|/share/video/)(\d+)', final_url)
-        if not m:
-            m = re.search(r'/video/(\d+)', resp.text)
-        if not m:
-            m = re.search(r'/(\d{10,})', final_url)
-        if not m:
-            raise Exception("无法解析抖音视频ID，请检查链接是否有效")
-        video_id = m.group(1)
-
-        # 4) 请求 detail 接口（关键！）多端点轮换 + 重试（防临时限流）
-        self._set_progress_thread(10, "请求视频数据...")
-        import time as _time
-        endpoints = [
-            "https://www.douyin.com/aweme/v1/web/aweme/detail/",
-            "https://m.douyin.com/aweme/v1/aweme/detail/",
-            "https://www.iesdouyin.com/aweme/v1/aweme/detail/",
-        ]
-        api = None
-        for ep in endpoints:
-            for attempt in range(2):
-                try:
-                    api = session.get(
-                        ep,
-                        params={"aweme_id": video_id},
-                        headers={
-                            "Referer": "https://www.douyin.com/",
-                            "User-Agent": DESKTOP_UA,
-                            "Accept-Language": "zh-CN,zh;q=0.9",
-                        },
-                        timeout=20,
-                    )
-                    Clock.schedule_once(lambda dt, ep=ep[:45], sc=api.status_code, ln=len(api.text or ""):
-                        self.log(f"[...] {ep} => {sc}/{ln}"))
-                    if api.status_code == 200 and (api.text or "").strip():
-                        break
-                    api = None
-                except Exception:
-                    api = None
-                if attempt == 0:
-                    Clock.schedule_once(lambda dt:
-                        self.log("[...] 接口繁忙，换端点/重试..."))
-                    _time.sleep(1.5 + attempt * 1.5)
-            if api is not None and (api.text or "").strip():
-                break
-        if api is None or not (api.text or "").strip():
-            raise Exception("接口多次请求失败（抖音风控冷却中，请等1分钟再试）")
-        try:
-            data = api.json()
-        except Exception:
-            raise Exception(f"接口返回非JSON: {api.status_code} {api.text[:80]}")
-        ad = data.get("aweme_detail") or {}
-        if not ad:
-            raise Exception("接口未返回视频数据（尝试重试：抖音URL有时效）")
-
-        # 5) 提取无水印地址（play_addr → download_addr → bit_rate）
-        video = ad.get("video", {}) or {}
-        dl_url = None
-        for key in ("play_addr", "download_addr", "bit_rate"):
-            node = video.get(key)
-            if isinstance(node, list) and node:
-                b0 = node[0]
-                if isinstance(b0, dict):
-                    node = b0.get("play_addr") or b0
-            if isinstance(node, dict):
-                ul = node.get("url_list") or []
-                if ul:
-                    dl_url = ul[0]
-                    break
-        if not dl_url:
-            # 兜底：递归找 url_list
-            dl_url = self._find_first_url_list(data)
-        if not dl_url:
-            raise Exception("未找到视频下载地址")
-
-        dl_url = dl_url.replace('watermark=1', 'watermark=0')
-        dl_url = dl_url.replace('playwm', 'play')
-
-        # ★ 将下载地址复制到剪贴板（用户可自行用浏览器/下载器下载——终极兜底！）
-        try:
-            from kivy.core.clipboard import Clipboard as _CB
-            _CB.copy(dl_url)
-            Clock.schedule_once(lambda dt, u=dl_url[:60]:
-                self.log(f"[✔] 下载地址已复制到剪贴板：{u}..."))
+            self._try_download_ytdlp(url)
+            return
+        except _MissingFFmpeg:
+            self._show_missing_ffmpeg()
+            return
+        except Exception as e:
+            Clock.schedule_once(lambda dt, e=e:
+                self.log(f"[!] 抖音自动下载失败：{str(e)[:110]}"))
             Clock.schedule_once(lambda dt:
-                self.log("[✔] （提示：若自动下载失败，粘贴到浏览器/保存即可下载）"))
+                self.log("[i] 抖音有 Argus 风控，自动解析已不可用"))
+        self._show_browser_fallback(url)
+
+    def _show_browser_fallback(self, url: str):
+        """自动下载失败时：用浏览器打开原链接，让用户在浏览器里下载。"""
+        def _do_open(*_args):
+            self._open_url_in_browser(url)
+
+        def _do_copy(*_args):
+            try:
+                Clipboard.copy(url)
+                self.log("[OK] 链接已复制，可粘贴到浏览器或下载工具")
+            except Exception:
+                pass
+
+        try:
+            content = BoxLayout(orientation="vertical", padding=10, spacing=8)
+            content.add_widget(Label(
+                text=("抖音已启用风控，本机无法直接解析下载。\n\n"
+                      "建议用浏览器打开原链接，在浏览器里下载。\n"
+                      "（也可以把链接复制到第三方解析工具）"),
+                font_name=FONT_NAME,
+            ))
+            btn_box = BoxLayout(size_hint=(1, 0.35), spacing=8)
+
+            open_btn = Button(text="用浏览器打开", font_name=FONT_NAME,
+                              background_color=(0.2, 0.6, 1, 1))
+            open_btn.bind(on_press=_do_open)
+            btn_box.add_widget(open_btn)
+
+            copy_btn = Button(text="复制链接", font_name=FONT_NAME,
+                              background_color=(0.5, 0.5, 0.5, 1))
+            copy_btn.bind(on_press=_do_copy)
+            btn_box.add_widget(copy_btn)
+
+            popup = Popup(title="抖音下载", content=content, size_hint=(0.85, 0.42))
+            close_btn = Button(text="关闭", font_name=FONT_NAME)
+            close_btn.bind(on_press=popup.dismiss)
+            btn_box.add_widget(close_btn)
+
+            content.add_widget(btn_box)
+            popup.open()
+        except Exception:
+            # 弹窗都失败就直接复制链接兜底
+            _do_copy()
+            self.log(f"[i] 请手动用浏览器打开：{url}")
+
+    def _open_url_in_browser(self, url: str):
+        """打开浏览器访问 url，并把链接复制到剪贴板。"""
+        try:
+            Clipboard.copy(url)
         except Exception:
             pass
-
-        title = ad.get("desc") or f"抖音_{video_id}"
-        outpath = os.path.join(_DOWNLOAD_DIR, f"dy_{video_id}.mp4")
-
-        Clock.schedule_once(lambda dt, t=title[:40], v=video_id:
-            self.log(f"[...] 抖音: {t}"))
-        self._stream_download(dl_url, outpath, 0, title, {
-            "Referer": "https://www.douyin.com/",
-            "User-Agent": DESKTOP_UA,
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        })
-
-    def _find_first_url_list(self, obj, depth=0):
-        """深度优先找第一个 url_list 里的 https 地址"""
-        if depth > 20 or obj is None:
-            return None
-        if isinstance(obj, dict):
-            ul = obj.get("url_list")
-            if isinstance(ul, list) and ul and isinstance(ul[0], str) and ul[0].startswith("http"):
-                return ul[0]
-            for v in obj.values():
-                found = self._find_first_url_list(v, depth + 1)
-                if found:
-                    return found
-        elif isinstance(obj, list):
-            for item in obj:
-                found = self._find_first_url_list(item, depth + 1)
-                if found:
-                    return found
-        return None
-
-    def _search_douyin_video(self, obj, depth=0):
-        """递归搜索抖音RENDER_DATA中的视频信息"""
-        if depth > 15 or obj is None:
-            return None
-
-        if isinstance(obj, dict):
-            # 查找包含play_addr的字典
-            if 'video' in obj and isinstance(obj['video'], dict):
-                v = obj['video']
-                result = {}
-                # play_addr
-                pa = v.get('play_addr', {})
-                if isinstance(pa, dict) and 'url_list' in pa:
-                    result['play_addr'] = pa['url_list'][0] if pa['url_list'] else None
-                # download_addr（可能无水印）
-                da = v.get('download_addr', {})
-                if isinstance(da, dict) and 'url_list' in da:
-                    result['download_addr'] = da['url_list'][0] if da['url_list'] else None
-                # bit_rate（高清）
-                br = v.get('bit_rate', [])
-                if br and isinstance(br, list) and len(br) > 0:
-                    b0 = br[0]
-                    if isinstance(b0, dict) and 'play_addr' in b0:
-                        bpa = b0['play_addr']
-                        if isinstance(bpa, dict) and 'url_list' in bpa:
-                            result['bit_rate'] = bpa['url_list'][0] if bpa['url_list'] else None
-                # title
-                if 'desc' in obj:
-                    result['title'] = obj['desc']
-                elif 'title' in obj:
-                    result['title'] = obj['title']
-
-                if result.get('play_addr') or result.get('download_addr'):
-                    return result
-
-            # 递归搜索所有值
-            for key, value in obj.items():
-                found = self._search_douyin_video(value, depth + 1)
-                if found:
-                    # 补充title
-                    if 'desc' in obj and not found.get('title'):
-                        found['title'] = obj['desc']
-                    return found
-
-        elif isinstance(obj, list):
-            for item in obj:
-                found = self._search_douyin_video(item, depth + 1)
-                if found:
-                    return found
-
-        return None
+        # Android：显式 Intent 打开浏览器
+        try:
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            PythonActivity.mActivity.startActivity(intent)
+            return
+        except Exception:
+            pass
+        # 桌面端：webbrowser
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
 
     # ========== 策略2：通用网页抓取 mp4/video ==========
     def _try_download_generic(self, url: str):
