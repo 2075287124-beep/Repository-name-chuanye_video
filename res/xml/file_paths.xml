@@ -1,9 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
-<paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 允许分享外部存储中的文件（Download 目录等） -->
-    <external-path name="external_files" path="."/>
-    <!-- 允许分享应用缓存文件 -->
-    <cache-path name="cache" path="."/>
-    <!-- 允许分享应用内部文件 -->
-    <files-path name="internal_files" path="."/>
+<!--
+  FileProvider 路径映射表
+  ========================================================================
+  位置：res/xml/file_paths.xml
+  用途：Android 7.0 (API 24) 起禁止直接分享 file:// URI，
+        必须通过 FileProvider 换成 content:// URI。
+        main.py 的 _open_file() Plan A 就依赖这个文件。
+
+  ⚠️ 关键规则：<external-path> 的 path="." 表示「整个外部存储根目录」。
+     main.py 可能把视频存到这些位置，所以这里要全部覆盖：
+       /storage/emulated/0/Download      -> external-path
+       /sdcard/Download                  -> external-path
+       应用私有目录 files/                -> files-path
+       应用外部私有目录                   -> external-files-path
+       缓存目录                          -> cache-path
+
+     如果这里没覆盖到实际保存目录，FileProvider.getUriForFile() 会抛
+     IllegalArgumentException，表现就是「打开文件失败」。
+  ========================================================================
+-->
+<paths>
+    <!-- 外部存储根目录：覆盖 /storage/emulated/0/ 下的所有路径，
+         包括 Download、以及 App 自己建的子目录 -->
+    <external-path
+        name="external_root"
+        path="." />
+
+    <!-- Android 4.4+ 的 App 外部私有目录：
+         /storage/emulated/0/Android/data/<包名>/files/ -->
+    <external-files-path
+        name="external_files"
+        path="." />
+
+    <!-- App 内部私有目录：/data/data/<包名>/files/
+         （Android 13+ 上外部存储不可写时，程序会退到这里保存） -->
+    <files-path
+        name="internal_files"
+        path="." />
+
+    <!-- App 内部缓存目录 -->
+    <cache-path
+        name="internal_cache"
+        path="." />
 </paths>
